@@ -1,0 +1,6 @@
+{
+  "name": "Atelier Estate — Brokerage Automation Command Center",
+  "description": "Multi-agent real estate brokerage command center with AI lead qualification, showing tour scheduling, listing marketing automation, and Google Calendar & Gmail sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
