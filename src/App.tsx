@@ -84,6 +84,7 @@ import {
 import { WorkspaceConfirmModal } from './components/WorkspaceConfirmModal';
 import {
   LeadsDashboardTab,
+  LeadsFunnelTab,
   BrokeragePerformanceView,
 } from './components/BrokerageCharts';
 import {
@@ -152,9 +153,9 @@ export function App() {
   const [selectedEmployeeId, setSelectedEmployeeId] =
     useState<EmployeeId>('clara');
   const [activeTab, setActiveTab] = useState<MainTab>('chat');
-  const [leadsSubTab, setLeadsSubTab] = useState<'dashboard' | 'table'>(
-    'dashboard'
-  );
+  const [leadsSubTab, setLeadsSubTab] = useState<
+    'dashboard' | 'funnel' | 'table'
+  >('funnel');
   const [leadStatusFilter, setLeadStatusFilter] = useState<
     'ALL' | ClientLead['status']
   >('ALL');
@@ -178,7 +179,14 @@ export function App() {
     const saved = localStorage.getItem('atelier_leads_v5');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed: ClientLead[] = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          const existingIds = new Set(parsed.map((l) => l.id));
+          const missingDefaults = INITIAL_LEADS.filter(
+            (initLead) => !existingIds.has(initLead.id)
+          );
+          return [...parsed, ...missingDefaults];
+        }
       } catch {
         // fallback
       }
@@ -3690,7 +3698,7 @@ export function App() {
               </div>
 
               <div className="flex items-center gap-3">
-                {/* Sub-Tab Switcher inside Leads & Clients DB: Dashboard vs CRM Table */}
+                {/* Sub-Tab Switcher inside Leads & Clients DB: Dashboard vs Funnel vs CRM Table */}
                 <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
                   <button
                     onClick={() => setLeadsSubTab('dashboard')}
@@ -3702,6 +3710,17 @@ export function App() {
                   >
                     <LayoutDashboard className="w-3.5 h-3.5" />
                     Dashboard
+                  </button>
+                  <button
+                    onClick={() => setLeadsSubTab('funnel')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                      leadsSubTab === 'funnel'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Filter className="w-3.5 h-3.5" />
+                    Funnel ({leads.length})
                   </button>
                   <button
                     onClick={() => setLeadsSubTab('table')}
@@ -3735,6 +3754,39 @@ export function App() {
                   onDeleteReminder={handleDeleteReminder}
                   onRunReminderWithAi={handleRunReminderWithAi}
                   onOpenScheduleReminder={openScheduleReminderModal}
+                />
+              )}
+
+              {leadsSubTab === 'funnel' && (
+                <LeadsFunnelTab
+                  leads={leads}
+                  activeStatusFilter={leadStatusFilter}
+                  onSelectStatusFilter={(status) => setLeadStatusFilter(status)}
+                  onAnalyzeLeadWithAi={handleAnalyzeLeadWithAi}
+                  onUpdateLeadStatus={(leadId, newStatus) => {
+                    const targetLead = leads.find((l) => l.id === leadId);
+                    setLeads((prev) =>
+                      prev.map((l) =>
+                        l.id === leadId
+                          ? {
+                              ...l,
+                              status: newStatus,
+                              lastContacted: `Moved to ${newStatus} just now`,
+                            }
+                          : l
+                      )
+                    );
+                    if (targetLead) {
+                      appendBotLog({
+                        employeeId: 'marcus',
+                        category: 'AI_TASK',
+                        status: 'SUCCESS',
+                        title: `Pipeline Stage Advanced: ${targetLead.name} → ${newStatus}`,
+                        detail: `${targetLead.name} (${targetLead.propertyInterest}, ${targetLead.budget}) moved from "${targetLead.status}" to "${newStatus}" in the Leads Funnel.`,
+                        channelOrTool: 'Leads Pipeline Funnel',
+                      });
+                    }
+                  }}
                 />
               )}
 
@@ -3793,18 +3845,18 @@ export function App() {
                         <option value="ALL">
                           All Statuses ({leads.length})
                         </option>
-                        <option value="AI Qualified">
-                          AI Qualified (
+                        <option value="Unqualified">
+                          Unqualified / Inbound (
                           {
-                            leads.filter((l) => l.status === 'AI Qualified')
+                            leads.filter((l) => l.status === 'Unqualified')
                               .length
                           }
                           )
                         </option>
-                        <option value="Tour Scheduled">
-                          Tour Scheduled (
+                        <option value="AI Qualified">
+                          AI Qualified (
                           {
-                            leads.filter((l) => l.status === 'Tour Scheduled')
+                            leads.filter((l) => l.status === 'AI Qualified')
                               .length
                           }
                           )
@@ -3817,10 +3869,26 @@ export function App() {
                           }
                           )
                         </option>
-                        <option value="Unqualified">
-                          Unqualified (
+                        <option value="Tour Scheduled">
+                          Tour Scheduled (
                           {
-                            leads.filter((l) => l.status === 'Unqualified')
+                            leads.filter((l) => l.status === 'Tour Scheduled')
+                              .length
+                          }
+                          )
+                        </option>
+                        <option value="Offer Submitted">
+                          Offer Submitted (
+                          {
+                            leads.filter((l) => l.status === 'Offer Submitted')
+                              .length
+                          }
+                          )
+                        </option>
+                        <option value="Closed Property">
+                          Closed Property (
+                          {
+                            leads.filter((l) => l.status === 'Closed Property')
                               .length
                           }
                           )
@@ -3847,10 +3915,12 @@ export function App() {
                     {(
                       [
                         { label: 'All Segments', value: 'ALL' },
+                        { label: 'Inbound / Unqualified', value: 'Unqualified' },
                         { label: 'AI Qualified', value: 'AI Qualified' },
-                        { label: 'Tour Scheduled', value: 'Tour Scheduled' },
                         { label: 'Follow-Up Sent', value: 'Follow-Up Sent' },
-                        { label: 'Unqualified', value: 'Unqualified' },
+                        { label: 'Tour Scheduled', value: 'Tour Scheduled' },
+                        { label: 'Offer Submitted', value: 'Offer Submitted' },
+                        { label: 'Closed Property', value: 'Closed Property' },
                       ] as const
                     ).map((seg) => {
                       const count =
@@ -3981,7 +4051,11 @@ export function App() {
                                   }
                                   title={`Filter by ${lead.status}`}
                                   className={`px-2 py-0.5 rounded-md font-semibold transition-opacity hover:opacity-80 ${
-                                    lead.status === 'Tour Scheduled'
+                                    lead.status === 'Closed Property'
+                                      ? 'bg-slate-900 text-amber-300 border border-slate-900'
+                                      : lead.status === 'Offer Submitted'
+                                      ? 'bg-purple-50 text-purple-700 border border-purple-200'
+                                      : lead.status === 'Tour Scheduled'
                                       ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                                       : lead.status === 'AI Qualified'
                                       ? 'bg-blue-50 text-blue-700 border border-blue-200'
@@ -4605,10 +4679,14 @@ export function App() {
                     }
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
                   >
-                    <option value="Unqualified">Unqualified</option>
+                    <option value="Unqualified">
+                      Unqualified (Inbound Inquiry)
+                    </option>
                     <option value="AI Qualified">AI Qualified</option>
                     <option value="Follow-Up Sent">Follow-Up Sent</option>
                     <option value="Tour Scheduled">Tour Scheduled</option>
+                    <option value="Offer Submitted">Offer Submitted</option>
+                    <option value="Closed Property">Closed Property</option>
                   </select>
                 </div>
               </div>

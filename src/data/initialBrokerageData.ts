@@ -323,6 +323,40 @@ export const INITIAL_LEADS: ClientLead[] = [
     notes:
       'Inquired via WhatsApp regarding Point Dume pocket listing; awaiting proof of funds.',
   },
+  {
+    id: 'lead-5',
+    name: 'Elena & Marcus Vance-Kerr',
+    email: 'mkerr@kerrholdings.co.uk',
+    phone: '+1 (310) 774-2910',
+    source: 'Agency Website',
+    budget: '$14,850,000',
+    timeline: 'In Escrow (14 Days)',
+    propertyInterest: 'Villa Solaris Promontory',
+    qualificationScore: 98,
+    status: 'Offer Submitted',
+    assignedEmployeeId: 'aria',
+    assignedHumanAgentId: 'agent-1',
+    lastContacted: '35 mins ago',
+    notes:
+      'Completed second private showing with Victoria Sterling; formal all-cash offer submitted with 14-day close.',
+  },
+  {
+    id: 'lead-6',
+    name: 'Julianne & Harrison Sterling-Wells',
+    email: 'hwells@sterlingwellscapital.com',
+    phone: '+1 (212) 609-4410',
+    source: 'Direct Referral',
+    budget: '$9,450,000',
+    timeline: 'Closed & Recorded',
+    propertyInterest: 'The Mercer Cast-Iron Penthouse',
+    qualificationScore: 99,
+    status: 'Closed Property',
+    assignedEmployeeId: 'aria',
+    assignedHumanAgentId: 'agent-2',
+    lastContacted: 'Yesterday',
+    notes:
+      'Closed property transaction at full asking price with Senior Partner Alexander Vance. Wire & deed recorded.',
+  },
 ];
 
 // All third-party API channels start 100% BLANK (connected: false, accountHandle: '', accounts: [])

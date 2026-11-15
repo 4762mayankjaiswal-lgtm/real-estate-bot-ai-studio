@@ -120,13 +120,113 @@ export async function verifyGoogleAccessTokenLive(
   );
 }
 
+const CUSTOM_GOOGLE_CLIENT_ID_STORAGE_KEY = 'atelier_custom_google_client_id';
+
+export function getCustomGoogleClientId(): string {
+  if (typeof window !== 'undefined') {
+    const saved = localStorage.getItem(CUSTOM_GOOGLE_CLIENT_ID_STORAGE_KEY);
+    if (saved && saved.trim()) return saved.trim();
+  }
+  const envId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
+  if (envId && String(envId).trim()) return String(envId).trim();
+  return '';
+}
+
+export function setCustomGoogleClientId(clientId: string): void {
+  if (typeof window !== 'undefined') {
+    const cleaned = (clientId || '').trim();
+    if (cleaned) {
+      localStorage.setItem(CUSTOM_GOOGLE_CLIENT_ID_STORAGE_KEY, cleaned);
+    } else {
+      localStorage.removeItem(CUSTOM_GOOGLE_CLIENT_ID_STORAGE_KEY);
+    }
+  }
+}
+
+async function loadGoogleIdentityServicesScript(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if ((window as any).google?.accounts?.oauth2) return;
+
+  await new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector(
+      'script[src="https://accounts.google.com/gsi/client"]'
+    ) as HTMLScriptElement | null;
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () =>
+        reject(new Error('Failed to load Google Identity Services script.'))
+      );
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = () =>
+      reject(new Error('Failed to load Google Identity Services script.'));
+    document.head.appendChild(script);
+  });
+}
+
+async function signInWithGoogleIdentityServicesPopup(
+  clientId: string
+): Promise<string> {
+  await loadGoogleIdentityServicesScript();
+  const oauth2 = (window as any).google?.accounts?.oauth2;
+  if (!oauth2) {
+    throw new Error('Google Identity Services OAuth2 client failed to initialize.');
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const tokenClient = oauth2.initTokenClient({
+      client_id: clientId.trim(),
+      scope: SCOPES.join(' '),
+      prompt: 'select_account consent',
+      callback: (response: any) => {
+        if (response?.error) {
+          reject(
+            new Error(
+              `Google OAuth error (${response.error}): ${
+                response.error_description ||
+                'Ensure your Render URL is added under Authorized JavaScript origins in Google Cloud Console.'
+              }`
+            )
+          );
+          return;
+        }
+        if (!response?.access_token) {
+          reject(new Error('No access_token returned from Google OAuth popup.'));
+          return;
+        }
+        resolve(response.access_token);
+      },
+      error_callback: (err: any) => {
+        reject(
+          new Error(
+            err?.message ||
+              'Google OAuth popup closed or blocked by the browser.'
+          )
+        );
+      },
+    });
+
+    tokenClient.requestAccessToken({ prompt: 'select_account consent' });
+  });
+}
+
 /**
  * Launches the real Google OAuth 2.0 Popup chooser and verifies the token live against Gmail API.
+ * Supports:
+ * 1. Direct OAuth 2.0 Access Token (ya29...)
+ * 2. Custom Google OAuth Client ID (via Google Identity Services — ideal for Render / custom domains)
+ * 3. Default Firebase Google Auth Popup (with automatic Render domain diagnostic message)
  */
 export async function connectGoogleWorkspace(
-  directOAuthAccessToken?: string
+  directOAuthAccessToken?: string,
+  overrideClientId?: string
 ): Promise<StoredWorkspaceAuth> {
-  // If user pasted a real Google OAuth 2.0 access token (ya29....), verify it live against Google's servers
+  // 1. If user pasted a real Google OAuth 2.0 access token (ya29....), verify it live against Google's servers
   if (directOAuthAccessToken && directOAuthAccessToken.trim().length > 0) {
     const cleanToken = directOAuthAccessToken.trim();
     const verified = await verifyGoogleAccessTokenLive(cleanToken);
@@ -143,32 +243,71 @@ export async function connectGoogleWorkspace(
     return stored;
   }
 
-  // Otherwise launch real Google OAuth Account Selector Popup via Firebase Auth
-  const result = await signInWithPopup(auth, provider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  const accessToken = credential?.accessToken;
-
-  if (!accessToken) {
-    throw new Error(
-      'Google Sign-In did not return an OAuth access token. Please grant Gmail & Calendar permissions in the Google consent popup.'
-    );
+  // 2. If a custom Google OAuth Client ID is configured (for Render or custom domains), use Google Identity Services directly
+  const customClientId = (overrideClientId || getCustomGoogleClientId()).trim();
+  if (customClientId) {
+    setCustomGoogleClientId(customClientId);
+    const accessToken =
+      await signInWithGoogleIdentityServicesPopup(customClientId);
+    const verified = await verifyGoogleAccessTokenLive(accessToken);
+    const stored: StoredWorkspaceAuth = {
+      userEmail: verified.emailAddress,
+      displayName: verified.emailAddress.split('@')[0],
+      accessToken,
+      messagesTotal: verified.messagesTotal,
+      threadsTotal: verified.threadsTotal,
+      connectedAt: new Date().toISOString(),
+    };
+    inMemoryAccessToken = accessToken;
+    inMemoryUserProfile = stored;
+    return stored;
   }
 
-  const verified = await verifyGoogleAccessTokenLive(accessToken);
+  // 3. Otherwise launch Google OAuth Account Selector Popup via Firebase Auth
+  try {
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const accessToken = credential?.accessToken;
 
-  const stored: StoredWorkspaceAuth = {
-    userEmail: verified.emailAddress || result.user.email || '',
-    displayName:
-      result.user.displayName || verified.emailAddress.split('@')[0] || 'User',
-    accessToken,
-    messagesTotal: verified.messagesTotal,
-    threadsTotal: verified.threadsTotal,
-    connectedAt: new Date().toISOString(),
-  };
+    if (!accessToken) {
+      throw new Error(
+        'Google Sign-In did not return an OAuth access token. Please grant Gmail & Calendar permissions in the Google consent popup.'
+      );
+    }
 
-  inMemoryAccessToken = accessToken;
-  inMemoryUserProfile = stored;
-  return stored;
+    const verified = await verifyGoogleAccessTokenLive(accessToken);
+
+    const stored: StoredWorkspaceAuth = {
+      userEmail: verified.emailAddress || result.user.email || '',
+      displayName:
+        result.user.displayName ||
+        verified.emailAddress.split('@')[0] ||
+        'User',
+      accessToken,
+      messagesTotal: verified.messagesTotal,
+      threadsTotal: verified.threadsTotal,
+      connectedAt: new Date().toISOString(),
+    };
+
+    inMemoryAccessToken = accessToken;
+    inMemoryUserProfile = stored;
+    return stored;
+  } catch (err: any) {
+    const host =
+      typeof window !== 'undefined' ? window.location.hostname : 'your-render-domain.onrender.com';
+    const origin =
+      typeof window !== 'undefined' ? window.location.origin : 'https://your-render-domain.onrender.com';
+
+    if (
+      err?.code === 'auth/unauthorized-domain' ||
+      String(err?.message || '').includes('unauthorized-domain')
+    ) {
+      throw new Error(
+        `Domain "${host}" is not authorized in the default AI Studio Firebase project. To sign in on Render: paste your own Google OAuth Client ID (with "${origin}" added to Authorized JavaScript origins in Google Cloud Console) in the Render / Custom Domain box below, or use Option 3 (OAuth Access Token).`
+      );
+    }
+    throw err;
+  }
 }
 
 /**

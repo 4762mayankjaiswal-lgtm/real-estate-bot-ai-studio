@@ -233,7 +233,13 @@ export interface ClientLead {
   timeline: string;
   propertyInterest: string;
   qualificationScore: number;
-  status: 'Unqualified' | 'AI Qualified' | 'Follow-Up Sent' | 'Tour Scheduled';
+  status:
+    | 'Unqualified'
+    | 'AI Qualified'
+    | 'Follow-Up Sent'
+    | 'Tour Scheduled'
+    | 'Offer Submitted'
+    | 'Closed Property';
   assignedEmployeeId: EmployeeId;
   assignedHumanAgentId?: string;
   lastContacted: string;

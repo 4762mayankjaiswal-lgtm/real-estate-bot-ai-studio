@@ -77,11 +77,13 @@ export const LeadsDashboardTab: React.FC<LeadsDashboardProps> = ({
 
   // 2. Status Distribution Over Time (AreaChart + Live Status Breakdown)
   const statusCounts = useMemo(() => {
-    const counts = {
+    const counts: Record<ClientLead['status'], number> = {
       Unqualified: 0,
       'AI Qualified': 0,
       'Follow-Up Sent': 0,
       'Tour Scheduled': 0,
+      'Offer Submitted': 0,
+      'Closed Property': 0,
     };
     for (const l of leads) {
       if (counts[l.status] !== undefined) {
@@ -96,33 +98,43 @@ export const LeadsDashboardTab: React.FC<LeadsDashboardProps> = ({
     const tBase = Math.max(1, statusCounts['Tour Scheduled']);
     const fBase = Math.max(1, statusCounts['Follow-Up Sent']);
     const uBase = Math.max(1, statusCounts['Unqualified']);
+    const oBase = Math.max(0, statusCounts['Offer Submitted']);
+    const cBase = Math.max(0, statusCounts['Closed Property']);
 
     return [
       {
         period: 'Week 1',
-        'AI Qualified': Math.max(1, qBase - 1),
+        'Closed Property': Math.max(0, cBase - 1),
+        'Offer Submitted': Math.max(0, oBase - 1),
         'Tour Scheduled': Math.max(0, tBase - 1),
+        'AI Qualified': Math.max(1, qBase - 1),
         'Follow-Up Sent': fBase,
         Unqualified: uBase + 2,
       },
       {
         period: 'Week 2',
-        'AI Qualified': qBase,
+        'Closed Property': Math.max(0, cBase - 1),
+        'Offer Submitted': oBase,
         'Tour Scheduled': tBase,
+        'AI Qualified': qBase,
         'Follow-Up Sent': fBase + 1,
         Unqualified: uBase + 1,
       },
       {
         period: 'Week 3',
-        'AI Qualified': qBase + 1,
+        'Closed Property': cBase,
+        'Offer Submitted': oBase,
         'Tour Scheduled': tBase + 1,
+        'AI Qualified': qBase + 1,
         'Follow-Up Sent': fBase + 1,
         Unqualified: uBase,
       },
       {
         period: 'Current',
-        'AI Qualified': statusCounts['AI Qualified'],
+        'Closed Property': statusCounts['Closed Property'],
+        'Offer Submitted': statusCounts['Offer Submitted'],
         'Tour Scheduled': statusCounts['Tour Scheduled'],
+        'AI Qualified': statusCounts['AI Qualified'],
         'Follow-Up Sent': statusCounts['Follow-Up Sent'],
         Unqualified: statusCounts['Unqualified'],
       },
@@ -182,13 +194,17 @@ export const LeadsDashboardTab: React.FC<LeadsDashboardProps> = ({
 
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-2xs">
           <div className="text-xs font-medium text-slate-500">
-            Tours Scheduled
+            Tours & Closed Deals
           </div>
           <div className="text-2xl font-bold text-emerald-600 mt-1 tabular-nums">
-            {statusCounts['Tour Scheduled']}
+            {statusCounts['Tour Scheduled'] +
+              statusCounts['Offer Submitted'] +
+              statusCounts['Closed Property']}
           </div>
           <div className="text-[11px] text-slate-500 mt-1">
-            Synced with Google Calendar
+            {statusCounts['Tour Scheduled']} Tours ·{' '}
+            {statusCounts['Offer Submitted']} Offers ·{' '}
+            {statusCounts['Closed Property']} Closed
           </div>
         </div>
       </div>
@@ -386,7 +402,7 @@ export const LeadsDashboardTab: React.FC<LeadsDashboardProps> = ({
                 Lead Status Distribution Over Time
               </h3>
               <p className="text-xs text-slate-500">
-                Progression from Unqualified inquiries to AI Qualified & Tour Scheduled
+                Progression from Inbound Inquiries to Tour Scheduled, Offer Submitted & Closed Property
               </p>
             </div>
           </div>
@@ -411,6 +427,22 @@ export const LeadsDashboardTab: React.FC<LeadsDashboardProps> = ({
                   }}
                 />
                 <Legend wrapperStyle={{ fontSize: '12px' }} />
+                <Area
+                  type="monotone"
+                  dataKey="Closed Property"
+                  stackId="1"
+                  stroke="#0F172A"
+                  fill="#0F172A"
+                  fillOpacity={0.3}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="Offer Submitted"
+                  stackId="1"
+                  stroke="#7C3AED"
+                  fill="#8B5CF6"
+                  fillOpacity={0.25}
+                />
                 <Area
                   type="monotone"
                   dataKey="Tour Scheduled"
@@ -446,6 +478,499 @@ export const LeadsDashboardTab: React.FC<LeadsDashboardProps> = ({
               </AreaChart>
             </ResponsiveContainer>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// LEADS PIPELINE FUNNEL TAB (INBOUND INQUIRY -> CLOSED PROPERTY)
+// ============================================================================
+export const FUNNEL_STAGE_DEFINITIONS: {
+  status: ClientLead['status'];
+  stageNumber: string;
+  title: string;
+  subtitle: string;
+  barColor: string;
+  badgeClass: string;
+}[] = [
+  {
+    status: 'Unqualified',
+    stageNumber: '01',
+    title: 'Inbound Inquiry (Unqualified)',
+    subtitle: 'New website, WhatsApp, voice & social inquiries awaiting AI screening',
+    barColor: '#64748B',
+    badgeClass: 'bg-slate-100 text-slate-700 border-slate-200',
+  },
+  {
+    status: 'AI Qualified',
+    stageNumber: '02',
+    title: 'AI Qualified',
+    subtitle: 'Budget, timeline & property fit verified by AI Employees',
+    barColor: '#2563EB',
+    badgeClass: 'bg-blue-50 text-blue-700 border-blue-200',
+  },
+  {
+    status: 'Follow-Up Sent',
+    stageNumber: '03',
+    title: 'Follow-Up Sent',
+    subtitle: 'Personalized Gmail/WhatsApp property dossier & floor plans dispatched',
+    barColor: '#D97706',
+    badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
+  },
+  {
+    status: 'Tour Scheduled',
+    stageNumber: '04',
+    title: 'Tour Scheduled',
+    subtitle: 'Conflict-validated private showing synced to Human Agent Google Calendar',
+    barColor: '#059669',
+    badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  },
+  {
+    status: 'Offer Submitted',
+    stageNumber: '05',
+    title: 'Offer Submitted',
+    subtitle: 'Formal purchase offer & proof of funds in negotiation / escrow',
+    barColor: '#7C3AED',
+    badgeClass: 'bg-purple-50 text-purple-700 border-purple-200',
+  },
+  {
+    status: 'Closed Property',
+    stageNumber: '06',
+    title: 'Closed Property',
+    subtitle: 'Transaction completed, deed recorded & brokerage commission realized',
+    barColor: '#0F172A',
+    badgeClass: 'bg-slate-900 text-amber-300 border-slate-900',
+  },
+];
+
+interface LeadsFunnelTabProps {
+  leads: ClientLead[];
+  activeStatusFilter?: 'ALL' | ClientLead['status'];
+  onSelectStatusFilter?: (status: 'ALL' | ClientLead['status']) => void;
+  onUpdateLeadStatus?: (leadId: string, newStatus: ClientLead['status']) => void;
+  onAnalyzeLeadWithAi?: (lead: ClientLead) => void;
+}
+
+export const LeadsFunnelTab: React.FC<LeadsFunnelTabProps> = ({
+  leads,
+  activeStatusFilter = 'ALL',
+  onSelectStatusFilter,
+  onUpdateLeadStatus,
+  onAnalyzeLeadWithAi,
+}) => {
+  const funnelStages = useMemo(() => {
+    const total = Math.max(1, leads.length);
+    return FUNNEL_STAGE_DEFINITIONS.map((def, idx) => {
+      const stageLeads = leads.filter((l) => l.status === def.status);
+      const count = stageLeads.length;
+      const volumeMillions = +stageLeads
+        .reduce((acc, l) => acc + parseDollarMillions(l.budget), 0)
+        .toFixed(2);
+      const shareOfTotalPct = Math.round((count / total) * 100);
+      // Visual funnel width tapers smoothly from top of funnel while reflecting real counts
+      const visualWidthPct = Math.max(
+        22,
+        Math.min(100, Math.round(100 - idx * 11 + (count / total) * 25))
+      );
+
+      return {
+        ...def,
+        index: idx,
+        count,
+        leads: stageLeads,
+        volumeMillions,
+        shareOfTotalPct,
+        visualWidthPct,
+      };
+    });
+  }, [leads]);
+
+  const totalPipelineVolumeM = useMemo(
+    () =>
+      +leads
+        .reduce((acc, l) => acc + parseDollarMillions(l.budget), 0)
+        .toFixed(2),
+    [leads]
+  );
+
+  const closedStage = funnelStages.find((s) => s.status === 'Closed Property');
+  const offerStage = funnelStages.find((s) => s.status === 'Offer Submitted');
+  const tourStage = funnelStages.find((s) => s.status === 'Tour Scheduled');
+
+  const getNextStatus = (
+    current: ClientLead['status']
+  ): ClientLead['status'] | null => {
+    const order: ClientLead['status'][] = [
+      'Unqualified',
+      'AI Qualified',
+      'Follow-Up Sent',
+      'Tour Scheduled',
+      'Offer Submitted',
+      'Closed Property',
+    ];
+    const idx = order.indexOf(current);
+    if (idx === -1 || idx >= order.length - 1) return null;
+    return order[idx + 1];
+  };
+
+  return (
+    <div className="max-w-6xl mx-auto space-y-6">
+      {/* Top Funnel KPI Summary Strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {funnelStages.map((stage) => {
+          const isSelected = activeStatusFilter === stage.status;
+          return (
+            <button
+              key={stage.status}
+              type="button"
+              onClick={() =>
+                onSelectStatusFilter?.(
+                  isSelected ? 'ALL' : stage.status
+                )
+              }
+              className={`p-3.5 rounded-2xl border text-left transition-all ${
+                isSelected
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                  : 'bg-white text-slate-900 border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-1">
+                <span
+                  className={`text-[10px] font-mono font-bold ${
+                    isSelected ? 'text-amber-400' : 'text-slate-400'
+                  }`}
+                >
+                  STAGE {stage.stageNumber}
+                </span>
+                <span
+                  className={`text-[10px] font-mono font-semibold ${
+                    isSelected ? 'text-slate-300' : 'text-slate-500'
+                  }`}
+                >
+                  {stage.shareOfTotalPct}%
+                </span>
+              </div>
+              <div className="mt-1 text-2xl font-bold font-mono tabular-nums">
+                {stage.count}{' '}
+                <span
+                  className={`text-xs font-sans font-normal ${
+                    isSelected ? 'text-slate-300' : 'text-slate-500'
+                  }`}
+                >
+                  {stage.count === 1 ? 'lead' : 'leads'}
+                </span>
+              </div>
+              <div
+                className={`mt-0.5 text-xs font-bold truncate ${
+                  isSelected ? 'text-white' : 'text-slate-800'
+                }`}
+              >
+                {stage.status === 'Unqualified'
+                  ? 'Inbound Inquiry'
+                  : stage.status}
+              </div>
+              <div
+                className={`mt-1 text-[11px] font-mono tabular-nums ${
+                  isSelected ? 'text-emerald-300' : 'text-emerald-700'
+                }`}
+              >
+                ${stage.volumeMillions}M pipeline
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Main Funnel Visualization Row: Visual Conversion Funnel + Recharts Stage Breakdown */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left 7 Cols: Interactive Visual Pipeline Funnel (Inbound Inquiry -> Closed Property) */}
+        <div className="lg:col-span-7 bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex flex-col justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Conversion Funnel: Inbound Inquiry to Closed Property
+              </h3>
+              <p className="text-xs text-slate-500">
+                Total number of leads and portfolio value ($M) at each stage of the brokerage sales pipeline.
+              </p>
+            </div>
+            <div className="text-xs font-mono font-semibold text-slate-700 tabular-nums">
+              {leads.length} Total Leads · ${totalPipelineVolumeM}M Volume
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {funnelStages.map((stage) => {
+              const isSelected = activeStatusFilter === stage.status;
+              return (
+                <div
+                  key={stage.status}
+                  onClick={() =>
+                    onSelectStatusFilter?.(
+                      isSelected ? 'ALL' : stage.status
+                    )
+                  }
+                  className={`p-3 rounded-xl border cursor-pointer transition-all ${
+                    isSelected
+                      ? 'border-slate-900 bg-slate-50'
+                      : 'border-slate-200/90 hover:border-slate-300 bg-white'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3 mb-1.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[11px] font-mono font-bold text-slate-400">
+                        {stage.stageNumber}.
+                      </span>
+                      <span className="text-xs font-bold text-slate-900 truncate">
+                        {stage.title}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0 text-xs font-mono tabular-nums">
+                      <span className="font-bold text-slate-900">
+                        {stage.count} {stage.count === 1 ? 'Lead' : 'Leads'}
+                      </span>
+                      <span className="text-slate-400">·</span>
+                      <span className="font-semibold text-emerald-700">
+                        ${stage.volumeMillions}M
+                      </span>
+                      <span className="text-slate-400">·</span>
+                      <span className="text-slate-500">
+                        {stage.shareOfTotalPct}%
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Proportional Visual Funnel Bar */}
+                  <div className="w-full bg-slate-100 rounded-lg h-6 overflow-hidden flex items-center p-0.5">
+                    <div
+                      style={{
+                        width: `${stage.visualWidthPct}%`,
+                        backgroundColor: stage.barColor,
+                      }}
+                      className="h-full rounded-md transition-all duration-300 flex items-center justify-between px-2.5 text-[10px] font-mono font-bold text-white"
+                    >
+                      <span className="truncate">{stage.status}</span>
+                      <span>{stage.count}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-1.5 text-[11px] text-slate-500 flex items-center justify-between gap-2">
+                    <span className="truncate">{stage.subtitle}</span>
+                    <span className="text-[10px] font-semibold text-slate-700 shrink-0">
+                      {isSelected ? 'Showing filtered ↓' : 'Click to filter'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Right 5 Cols: Recharts Lead Count by Funnel Status Category + Conversion Summary */}
+        <div className="lg:col-span-5 bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex flex-col justify-between space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">
+              Leads Count by Pipeline Status Category
+            </h3>
+            <p className="text-xs text-slate-500">
+              Live comparison of total leads across all 6 funnel stages
+            </p>
+          </div>
+
+          <div className="h-72 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={funnelStages}
+                layout="vertical"
+                margin={{ top: 5, right: 20, left: 15, bottom: 5 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                <XAxis
+                  type="number"
+                  allowDecimals={false}
+                  tick={{ fontSize: 11, fill: '#475569' }}
+                />
+                <YAxis
+                  type="category"
+                  dataKey="status"
+                  width={110}
+                  tick={{ fontSize: 11, fill: '#0F172A', fontWeight: 600 }}
+                />
+                <Tooltip
+                  contentStyle={{
+                    borderRadius: '12px',
+                    border: '1px solid #E2E8F0',
+                    fontSize: '12px',
+                  }}
+                />
+                <Legend wrapperStyle={{ fontSize: '12px' }} />
+                <Bar
+                  dataKey="count"
+                  name="Total Leads in Stage"
+                  radius={[0, 6, 6, 0]}
+                >
+                  {funnelStages.map((entry, idx) => (
+                    <Cell key={`funnel-cell-${idx}`} fill={entry.barColor} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Pipeline Velocity Summary Box */}
+          <div className="p-4 rounded-xl bg-slate-900 text-slate-100 space-y-2">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+              Pipeline Closing Summary
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-xs font-mono tabular-nums">
+              <div>
+                <div className="text-slate-400 text-[10px] font-sans">
+                  Tours Booked
+                </div>
+                <div className="text-sm font-bold text-white">
+                  {tourStage?.count || 0} Leads
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-400 text-[10px] font-sans">
+                  Active Offers
+                </div>
+                <div className="text-sm font-bold text-purple-300">
+                  {offerStage?.count || 0} (${offerStage?.volumeMillions || 0}M)
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-400 text-[10px] font-sans">
+                  Closed Properties
+                </div>
+                <div className="text-sm font-bold text-emerald-400">
+                  {closedStage?.count || 0} (${closedStage?.volumeMillions || 0}M)
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Interactive Stage-by-Stage Pipeline Board (Move Leads Across Stages) */}
+      <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">
+              Interactive Pipeline Board by Status Category
+            </h3>
+            <p className="text-xs text-slate-500">
+              Advance any lead from Inbound Inquiry through Tour Scheduled, Offer Submitted, and Closed Property.
+            </p>
+          </div>
+          {activeStatusFilter !== 'ALL' && (
+            <button
+              type="button"
+              onClick={() => onSelectStatusFilter?.('ALL')}
+              className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold"
+            >
+              Reset Stage Filter ({activeStatusFilter})
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {funnelStages.map((stage) => (
+            <div
+              key={stage.status}
+              className="rounded-xl border border-slate-200 bg-slate-50/60 p-3.5 flex flex-col justify-between space-y-3"
+            >
+              <div>
+                <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-200">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-slate-900 truncate">
+                      {stage.stageNumber}.{' '}
+                      {stage.status === 'Unqualified'
+                        ? 'Inbound Inquiry'
+                        : stage.status}
+                    </div>
+                    <div className="text-[11px] text-emerald-700 font-mono font-semibold tabular-nums">
+                      ${stage.volumeMillions}M total budget
+                    </div>
+                  </div>
+                  <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-xs font-mono font-bold tabular-nums shrink-0">
+                    {stage.count} {stage.count === 1 ? 'Lead' : 'Leads'}
+                  </span>
+                </div>
+
+                <div className="mt-3 space-y-2.5">
+                  {stage.leads.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-slate-400">
+                      0 leads currently in {stage.status}
+                    </div>
+                  ) : (
+                    stage.leads.map((lead) => {
+                      const nextStage = getNextStatus(lead.status);
+                      return (
+                        <div
+                          key={lead.id}
+                          className="p-3 rounded-xl bg-white border border-slate-200 space-y-2"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold text-slate-900 truncate">
+                                {lead.name}
+                              </div>
+                              <div className="text-[11px] text-slate-500 truncate">
+                                {lead.propertyInterest}
+                              </div>
+                            </div>
+                            <span className="text-[11px] font-mono font-bold text-emerald-700 tabular-nums shrink-0">
+                              {lead.budget}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between text-[10px] text-slate-500">
+                            <span>Source: {lead.source}</span>
+                            <span className="font-mono font-semibold text-slate-700 tabular-nums">
+                              AI Score: {lead.qualificationScore}/100
+                            </span>
+                          </div>
+
+                          <div className="pt-1.5 border-t border-slate-100 flex items-center justify-between gap-1.5">
+                            {onAnalyzeLeadWithAi && (
+                              <button
+                                type="button"
+                                onClick={() => onAnalyzeLeadWithAi(lead)}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-800 text-[10px] font-semibold"
+                              >
+                                <Sparkles className="w-2.5 h-2.5 text-amber-500" />
+                                Analyze
+                              </button>
+                            )}
+
+                            {onUpdateLeadStatus && nextStage ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onUpdateLeadStatus(lead.id, nextStage)
+                                }
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-900 hover:bg-slate-800 text-white text-[10px] font-semibold ml-auto"
+                                title={`Advance lead to ${nextStage}`}
+                              >
+                                <span>Move to {nextStage} →</span>
+                              </button>
+                            ) : (
+                              <span className="text-[10px] font-semibold text-emerald-700 ml-auto">
+                                Deal Closed ✓
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
