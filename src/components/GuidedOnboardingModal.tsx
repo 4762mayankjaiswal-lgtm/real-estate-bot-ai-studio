@@ -137,6 +137,12 @@ interface GuidedOnboardingModalProps {
   onUpdateLlmSettings: (settings: LlmProviderSettings) => Promise<void>;
   onConnectGoogleWorkspace: (directOAuthToken?: string) => Promise<void>;
   onConnectGmailSmtp: (email: string, appPassword: string) => Promise<void>;
+  onConnectEmailProvider?: (params: {
+    provider: 'resend' | 'brevo';
+    apiKey: string;
+    fromEmail: string;
+    fromName?: string;
+  }) => Promise<void>;
   onSaveChannelConfig: (
     toolId: ToolId,
     updates: {
@@ -193,13 +199,13 @@ const CHANNEL_DEFS: ChannelFormDefinition[] = [
   },
   {
     id: 'gmail',
-    name: 'Gmail (Multi-Account OAuth 2.0 & App Password SMTP)',
+    name: 'Email & Gmail (Google OAuth, Resend, Brevo & SMTP)',
     subtitle:
-      'Send real emails from one or multiple Gmail accounts (e.g. brokerage inbox + individual agent inboxes)',
+      'Send real emails via Resend API, Brevo API, Google OAuth 2.0, or Gmail SMTP (Multi-Account)',
     type: 'google_oauth',
     secretFields: [],
     simpleHint:
-      'Connect via Google OAuth 2.0 Popup OR enter any Gmail address + 16-character Google App Password (from myaccount.google.com/apppasswords). You can add multiple Gmail accounts and switch active accounts anytime!',
+      'Connect Resend or Brevo (over HTTPS port 443 — works on Render & any host!), Google OAuth 2.0 Popup, or Gmail App Password SMTP. You can add multiple email accounts and switch active accounts anytime!',
   },
   {
     id: 'google_calendar',
@@ -324,6 +330,7 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
   onUpdateLlmSettings,
   onConnectGoogleWorkspace,
   onConnectGmailSmtp,
+  onConnectEmailProvider,
   onSaveChannelConfig,
   onDisconnectChannel,
   onManageChannelAccounts,
@@ -363,9 +370,19 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
     Record<string, ConnectedAppAccount[]>
   >({});
 
-  // Real Gmail SMTP & Direct OAuth Token State
+  // Real Gmail SMTP, Resend, Brevo & Direct OAuth Token State
   const [smtpEmailInput, setSmtpEmailInput] = useState('');
   const [smtpAppPasswordInput, setSmtpAppPasswordInput] = useState('');
+  const [resendApiKeyInput, setResendApiKeyInput] = useState('');
+  const [resendFromEmailInput, setResendFromEmailInput] = useState(
+    'onboarding@resend.dev'
+  );
+  const [resendFromNameInput, setResendFromNameInput] =
+    useState('Atelier Estate');
+  const [brevoApiKeyInput, setBrevoApiKeyInput] = useState('');
+  const [brevoFromEmailInput, setBrevoFromEmailInput] = useState('');
+  const [brevoFromNameInput, setBrevoFromNameInput] =
+    useState('Atelier Estate');
   const [directOAuthTokenInput, setDirectOAuthTokenInput] = useState('');
   const [testEmailRecipient, setTestEmailRecipient] = useState('');
   const [sendingTestEmail, setSendingTestEmail] = useState(false);
@@ -750,8 +767,8 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             to: testEmailRecipient.trim(),
-            subject: 'Atelier Estate — Live Gmail SMTP Verification Test',
-            body: `This is a real live email sent from your connected Gmail SMTP account (${googleAccountEmail}) via Atelier Estate.`,
+            subject: 'Atelier Estate — Live Email Verification Test',
+            body: `This is a real live email sent from your connected email account (${googleAccountEmail}) via Atelier Estate.`,
           }),
         });
         const data = await resp.json();
@@ -760,7 +777,9 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
         }
         setFeedback({
           type: 'success',
-          text: `✅ Real email delivered to ${testEmailRecipient.trim()} via Gmail SMTP! (Message ID: ${data.id})`,
+          text: `✅ Real email delivered to ${testEmailRecipient.trim()} via ${
+            data.provider || 'Email API'
+          }! (Message ID: ${data.id})`,
         });
       }
     } catch (err: any) {
@@ -823,6 +842,8 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
   const hasSmtpConfigured = Boolean(
     vaultStatus.GMAIL_SMTP_APP_PASSWORD?.configured
   );
+  const hasResendConfigured = Boolean(vaultStatus.RESEND_API_KEY?.configured);
+  const hasBrevoConfigured = Boolean(vaultStatus.BREVO_API_KEY?.configured);
 
   const liveWebhookEndpoint =
     typeof window !== 'undefined'
@@ -1524,13 +1545,298 @@ async function sendLeadToAtelierCRM(formData) {
                       </div>
                     </div>
 
-                    {/* Option 2: Real Gmail SMTP (Works with ANY Gmail account & supports multiple accounts) */}
+                    {/* Option 2: Resend Email API (HTTPS Port 443 — Works on Render & All Hosts) */}
+                    {selectedId === 'gmail' && (
+                      <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+                        <div>
+                          <div className="text-xs font-bold text-slate-900 flex items-center justify-between gap-2">
+                            <span>
+                              Option 2 — Connect Resend Email API (Recommended for Render & Hosted Sites)
+                            </span>
+                            {hasResendConfigured && (
+                              <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 shrink-0">
+                                Resend Active ({vaultStatus.RESEND_API_KEY?.masked})
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Sends transactional emails over HTTPS (
+                            <span className="font-mono">
+                              api.resend.com/emails
+                            </span>
+                            ) so it works on Render Free Tier & any cloud host without SMTP port blocking. Use{' '}
+                            <span className="font-mono font-semibold text-slate-700">
+                              onboarding@resend.dev
+                            </span>{' '}
+                            for testing or your verified Resend domain address.
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                              Resend API Key (re_...)
+                            </label>
+                            <input
+                              type="password"
+                              value={resendApiKeyInput}
+                              onChange={(e) =>
+                                setResendApiKeyInput(e.target.value)
+                              }
+                              placeholder="re_123456789..."
+                              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg font-mono focus:outline-none focus:border-slate-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                              Sender Email Address
+                            </label>
+                            <input
+                              type="email"
+                              value={resendFromEmailInput}
+                              onChange={(e) =>
+                                setResendFromEmailInput(e.target.value)
+                              }
+                              placeholder="onboarding@resend.dev"
+                              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                              Sender Display Name
+                            </label>
+                            <input
+                              type="text"
+                              value={resendFromNameInput}
+                              onChange={(e) =>
+                                setResendFromNameInput(e.target.value)
+                              }
+                              placeholder="Atelier Estate"
+                              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                            />
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={async () => {
+                            setSaving(true);
+                            setFeedback(null);
+                            try {
+                              if (onConnectEmailProvider) {
+                                await onConnectEmailProvider({
+                                  provider: 'resend',
+                                  apiKey: resendApiKeyInput.trim(),
+                                  fromEmail:
+                                    resendFromEmailInput.trim() ||
+                                    'onboarding@resend.dev',
+                                  fromName:
+                                    resendFromNameInput.trim() ||
+                                    'Atelier Estate',
+                                });
+                              } else {
+                                const resp = await fetch(
+                                  '/api/email/verify-provider',
+                                  {
+                                    method: 'POST',
+                                    headers: {
+                                      'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({
+                                      provider: 'resend',
+                                      apiKey: resendApiKeyInput.trim(),
+                                      fromEmail:
+                                        resendFromEmailInput.trim() ||
+                                        'onboarding@resend.dev',
+                                      fromName:
+                                        resendFromNameInput.trim() ||
+                                        'Atelier Estate',
+                                    }),
+                                  }
+                                );
+                                const data = await resp.json();
+                                if (!resp.ok || !data.ok) {
+                                  throw new Error(
+                                    data.error ||
+                                      'Resend API verification failed.'
+                                  );
+                                }
+                              }
+                              await refreshVaultStatus();
+                              setResendApiKeyInput('');
+                              setFeedback({
+                                type: 'success',
+                                text: `✅ Verified & Connected Resend HTTPS API (${
+                                  resendFromEmailInput.trim() ||
+                                  'onboarding@resend.dev'
+                                })!`,
+                              });
+                            } catch (err: any) {
+                              setFeedback({
+                                type: 'error',
+                                text:
+                                  err?.message ||
+                                  'Resend verification failed. Check your re_... API key.',
+                              });
+                            } finally {
+                              setSaving(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
+                        >
+                          {saving && (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          )}
+                          Verify Live & Connect Resend
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Option 3: Brevo Email API (HTTPS Port 443 — Works with ANY Verified Gmail/Domain on Render) */}
+                    {selectedId === 'gmail' && (
+                      <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+                        <div>
+                          <div className="text-xs font-bold text-slate-900 flex items-center justify-between gap-2">
+                            <span>
+                              Option 3 — Connect Brevo Email API (Send to Any Recipient on Render Free Tier)
+                            </span>
+                            {hasBrevoConfigured && (
+                              <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 shrink-0">
+                                Brevo Active ({vaultStatus.BREVO_API_KEY?.masked})
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Sends emails over HTTPS (
+                            <span className="font-mono">
+                              api.brevo.com/v3/smtp/email
+                            </span>
+                            ). Brevo lets you verify any Gmail or business email address as a sender for free (up to 300 emails/day) without needing a custom domain.
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                              Brevo V3 API Key (xkeysib-...)
+                            </label>
+                            <input
+                              type="password"
+                              value={brevoApiKeyInput}
+                              onChange={(e) =>
+                                setBrevoApiKeyInput(e.target.value)
+                              }
+                              placeholder="xkeysib-..."
+                              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg font-mono focus:outline-none focus:border-slate-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                              Verified Brevo Sender Email
+                            </label>
+                            <input
+                              type="email"
+                              value={brevoFromEmailInput}
+                              onChange={(e) =>
+                                setBrevoFromEmailInput(e.target.value)
+                              }
+                              placeholder="your-verified-sender@gmail.com"
+                              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                              Sender Display Name
+                            </label>
+                            <input
+                              type="text"
+                              value={brevoFromNameInput}
+                              onChange={(e) =>
+                                setBrevoFromNameInput(e.target.value)
+                              }
+                              placeholder="Atelier Estate"
+                              className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
+                            />
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={async () => {
+                            setSaving(true);
+                            setFeedback(null);
+                            try {
+                              if (onConnectEmailProvider) {
+                                await onConnectEmailProvider({
+                                  provider: 'brevo',
+                                  apiKey: brevoApiKeyInput.trim(),
+                                  fromEmail: brevoFromEmailInput.trim(),
+                                  fromName:
+                                    brevoFromNameInput.trim() ||
+                                    'Atelier Estate',
+                                });
+                              } else {
+                                const resp = await fetch(
+                                  '/api/email/verify-provider',
+                                  {
+                                    method: 'POST',
+                                    headers: {
+                                      'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({
+                                      provider: 'brevo',
+                                      apiKey: brevoApiKeyInput.trim(),
+                                      fromEmail: brevoFromEmailInput.trim(),
+                                      fromName:
+                                        brevoFromNameInput.trim() ||
+                                        'Atelier Estate',
+                                    }),
+                                  }
+                                );
+                                const data = await resp.json();
+                                if (!resp.ok || !data.ok) {
+                                  throw new Error(
+                                    data.error ||
+                                      'Brevo API verification failed.'
+                                  );
+                                }
+                              }
+                              await refreshVaultStatus();
+                              setBrevoApiKeyInput('');
+                              setFeedback({
+                                type: 'success',
+                                text: `✅ Verified & Connected Brevo HTTPS API (${brevoFromEmailInput.trim()})!`,
+                              });
+                            } catch (err: any) {
+                              setFeedback({
+                                type: 'error',
+                                text:
+                                  err?.message ||
+                                  'Brevo verification failed. Check your xkeysib-... API key and sender email.',
+                              });
+                            } finally {
+                              setSaving(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors"
+                        >
+                          {saving && (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          )}
+                          Verify Live & Connect Brevo
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Option 4: Real Gmail SMTP (Works with ANY Gmail account & supports multiple accounts) */}
                     {selectedId === 'gmail' && (
                       <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
                         <div>
                           <div className="text-xs font-bold text-slate-900 flex items-center justify-between">
                             <span>
-                              Option 2 — Add Any Gmail Account via Google App Password (Multi-Account SMTP)
+                              Option 4 — Add Any Gmail Account via Google App Password (Multi-Account SMTP)
                             </span>
                             {hasSmtpConfigured && (
                               <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
@@ -1621,10 +1927,10 @@ async function sendLeadToAtelierCRM(formData) {
                       </div>
                     )}
 
-                    {/* Option 3: Paste Direct Google OAuth 2.0 Access Token (ya29...) */}
+                    {/* Option 5: Paste Direct Google OAuth 2.0 Access Token (ya29...) */}
                     <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-2.5">
                       <label className="block text-xs font-bold text-slate-800">
-                        Option 3 — Paste Google OAuth 2.0 Access Token (ya29...)
+                        Option 5 — Paste Google OAuth 2.0 Access Token (ya29...)
                       </label>
                       <p className="text-[11px] text-slate-500">
                         Have an OAuth 2.0 bearer token from Google OAuth Playground? Paste it here to verify and add that Google account.

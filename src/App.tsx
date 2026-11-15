@@ -93,13 +93,19 @@ import {
   HumanAgentsDirectoryView,
   LeadAiAnalysisModal,
 } from './components/BotLogsAndHumanAgents';
+import {
+  LandingPageView,
+  ActiveLicenseSession,
+} from './components/LandingPageView';
+import { AdminLicenseEnquiriesView } from './components/AdminLicenseEnquiriesView';
 
 type MainTab =
   | 'chat'
   | 'properties'
   | 'leads'
   | 'human_agents'
-  | 'performance';
+  | 'performance'
+  | 'b2b_portal';
 
 
 interface CallTranscriptLine {
@@ -160,6 +166,22 @@ export function App() {
     'ALL' | ClientLead['status']
   >('ALL');
   const [leadSearchQuery, setLeadSearchQuery] = useState('');
+
+  // B2B License Lock & Public Landing Page State
+  const [licenseSession, setLicenseSession] =
+    useState<ActiveLicenseSession | null>(() => {
+      const saved = localStorage.getItem('atelier_license_session_v1');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    });
+  const [showPublicLandingPage, setShowPublicLandingPage] =
+    useState<boolean>(true);
 
   // 2. State: Properties Database (CRUD)
   const [properties, setProperties] = useState<PropertyListing[]>(() => {
@@ -625,11 +647,13 @@ export function App() {
       .then((r) => r.json())
       .then((data) => {
         if (!data.entries) return;
-        const smtpConfigured = Boolean(
-          data.entries.GMAIL_SMTP_APP_PASSWORD?.configured &&
+        const serverEmailConfigured = Boolean(
+          (data.entries.GMAIL_SMTP_APP_PASSWORD?.configured ||
+            data.entries.RESEND_API_KEY?.configured ||
+            data.entries.BREVO_API_KEY?.configured) &&
             data.configs?.gmail?.verified
         );
-        if (smtpConfigured) {
+        if (serverEmailConfigured) {
           setGmailSmtpVerified(true);
           if (data.configs?.gmail?.accountHandle) {
             setGoogleEmail(data.configs.gmail.accountHandle);
@@ -639,7 +663,7 @@ export function App() {
           prev.map((t) => {
             const cfg = data.configs?.[t.id];
             if (t.id === 'gmail') {
-              const isConnected = Boolean(smtpConfigured || googleToken);
+              const isConnected = Boolean(serverEmailConfigured || googleToken);
               return {
                 ...t,
                 connected: isConnected,
@@ -775,6 +799,64 @@ export function App() {
     });
   };
 
+  const handleConnectEmailProvider = async ({
+    provider,
+    apiKey,
+    fromEmail,
+    fromName,
+  }: {
+    provider: 'resend' | 'brevo';
+    apiKey: string;
+    fromEmail: string;
+    fromName?: string;
+  }) => {
+    const resp = await fetch('/api/email/verify-provider', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider,
+        apiKey,
+        fromEmail,
+        fromName,
+        senderEmail: fromEmail,
+        senderName: fromName,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      throw new Error(
+        data.error ||
+          `${provider === 'resend' ? 'Resend' : 'Brevo'} API verification failed. Please check your API key and sender email.`
+      );
+    }
+    const providerLabel = provider === 'resend' ? 'Resend HTTPS API' : 'Brevo V3 HTTPS API';
+    setGoogleEmail(data.email);
+    setGmailSmtpVerified(true);
+    setTools((prev) =>
+      prev.map((t) =>
+        t.id === 'gmail'
+          ? {
+              ...t,
+              connected: true,
+              accountHandle: data.email,
+              accounts: Array.isArray(data.accounts)
+                ? data.accounts
+                : t.accounts || [],
+              lastSync: `Verified ${providerLabel}`,
+            }
+          : t
+      )
+    );
+    appendBotLog({
+      employeeId: 'elena',
+      category: 'SYSTEM',
+      status: 'SUCCESS',
+      title: `Connected ${provider === 'resend' ? 'Resend' : 'Brevo'} Email Account: ${data.email}`,
+      detail: `Verified live ${providerLabel} over HTTPS (port 443) for ${data.email}.`,
+      channelOrTool: providerLabel,
+    });
+  };
+
   const handleDisconnectGoogle = async () => {
     await disconnectGoogleWorkspace();
     await fetch('/api/vault/clear', {
@@ -785,6 +867,13 @@ export function App() {
           'GMAIL_SMTP_USER',
           'GMAIL_SMTP_APP_PASSWORD',
           'GMAIL_SMTP_HOST',
+          'RESEND_API_KEY',
+          'RESEND_FROM_EMAIL',
+          'RESEND_FROM_NAME',
+          'BREVO_API_KEY',
+          'BREVO_FROM_EMAIL',
+          'BREVO_FROM_NAME',
+          'EMAIL_ACTIVE_PROVIDER',
         ],
         channelId: 'gmail',
       }),
@@ -2792,6 +2881,85 @@ export function App() {
   const connectedCount = tools.filter((t) => t.connected).length;
   const hasCustomLlmKey = Boolean(llmSettings.apiKey?.trim());
 
+  const handleUnlockSuccess = (session: ActiveLicenseSession) => {
+    setLicenseSession(session);
+    localStorage.setItem('atelier_license_session_v1', JSON.stringify(session));
+    setShowPublicLandingPage(false);
+  };
+
+  const handleLockSystemNow = () => {
+    setLicenseSession(null);
+    localStorage.removeItem('atelier_license_session_v1');
+    setShowPublicLandingPage(true);
+  };
+
+  if (showPublicLandingPage || !licenseSession) {
+    return (
+      <div className="relative min-h-screen bg-[#07090E]">
+        {/* Persistent Top Mode Switcher Bar for Owner */}
+        <div className="bg-amber-500 text-slate-950 px-4 py-2 flex flex-wrap items-center justify-between gap-3 text-xs font-bold border-b border-amber-600 z-50">
+          <div className="flex items-center gap-2">
+            <span className="px-2 py-0.5 rounded bg-slate-950 text-amber-400 font-mono text-[10px]">
+              LIVE PREVIEW
+            </span>
+            <span>
+              You are viewing your Public High-Converting Landing Page (Locked
+              for unpaid visitors)
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                const adminSess: ActiveLicenseSession = licenseSession || {
+                  role: 'ADMIN',
+                  agencyName: 'Atelier Estate AI (Master Admin)',
+                  clientName: 'System Owner',
+                  clientEmail: 'khushi4762@gmail.com',
+                  licenseKey: 'ADMIN-ESTATE-2026',
+                  planTier: 'Enterprise',
+                };
+                setLicenseSession(adminSess);
+                localStorage.setItem(
+                  'atelier_license_session_v1',
+                  JSON.stringify(adminSess)
+                );
+                setActiveTab('b2b_portal');
+                setShowPublicLandingPage(false);
+              }}
+              className="px-3 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-amber-300 text-xs font-bold transition cursor-pointer"
+            >
+              🔑 Open License Generator & Enquiries Hub →
+            </button>
+            <button
+              onClick={() => {
+                const adminSess: ActiveLicenseSession = licenseSession || {
+                  role: 'ADMIN',
+                  agencyName: 'Atelier Estate AI (Master Admin)',
+                  clientName: 'System Owner',
+                  clientEmail: 'khushi4762@gmail.com',
+                  licenseKey: 'ADMIN-ESTATE-2026',
+                  planTier: 'Enterprise',
+                };
+                setLicenseSession(adminSess);
+                localStorage.setItem(
+                  'atelier_license_session_v1',
+                  JSON.stringify(adminSess)
+                );
+                setActiveTab('chat');
+                setShowPublicLandingPage(false);
+              }}
+              className="px-3 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-950 text-xs font-bold transition cursor-pointer shadow-xs"
+            >
+              🤖 Open AI Automation Dashboard →
+            </button>
+          </div>
+        </div>
+
+        <LandingPageView onUnlockSuccess={handleUnlockSuccess} />
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 flex font-sans antialiased">
       {/* ====================================================================
@@ -2823,8 +2991,25 @@ export function App() {
           </button>
         </div>
 
-        {/* Prominent 1-Click BYOK LLM API Key Card */}
-        <div className="px-3 pt-3">
+        {/* Prominent 1-Click Public Landing Page & License Hub Buttons + BYOK Card */}
+        <div className="px-3 pt-3 space-y-2">
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={() => setShowPublicLandingPage(true)}
+              className="px-2.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs"
+            >
+              <Globe className="w-3.5 h-3.5 shrink-0" />
+              <span>Landing Page</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('b2b_portal')}
+              className="px-2.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/40 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+            >
+              <KeyRound className="w-3.5 h-3.5 shrink-0" />
+              <span>License Lock</span>
+            </button>
+          </div>
+
           <button
             onClick={() => {
               setOnboardingChannel('llm_engine');
@@ -3188,10 +3373,29 @@ export function App() {
               <BarChart3 className="w-3.5 h-3.5" />
               Performance
             </button>
+            <button
+              onClick={() => setActiveTab('b2b_portal')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'b2b_portal'
+                  ? 'bg-amber-500 text-slate-950 shadow-2xs'
+                  : 'text-amber-700 hover:text-slate-900 bg-amber-500/10'
+              }`}
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              License & Website
+            </button>
           </div>
 
           {/* Right: Live Voice Call + Bot Logs Dropdown + Side Panel Toggle + BYOK API Key Button */}
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setShowPublicLandingPage(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-300 text-xs font-semibold border border-slate-700 transition-all cursor-pointer"
+              title="Preview Public High-Converting Landing Page & Enquiry Form"
+            >
+              <Globe className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden xl:inline">Landing Page</span>
+            </button>
             {!isCallActive ? (
               <button
                 onClick={startLiveVoiceCall}
@@ -4299,6 +4503,18 @@ export function App() {
             employees={employees}
           />
         )}
+
+        {/* ====================================================================
+            VIEW 6: B2B SALES, CLIENT LICENSE LOCK & HOSTINGER WEBSITE HUB
+            ==================================================================== */}
+        {activeTab === 'b2b_portal' && (
+          <div className="flex-1 overflow-y-auto p-6 bg-slate-950 text-slate-100">
+            <AdminLicenseEnquiriesView
+              onOpenLandingPreview={() => setShowPublicLandingPage(true)}
+              onLockSystemNow={handleLockSystemNow}
+            />
+          </div>
+        )}
       </main>
 
       {/* ====================================================================
@@ -4331,6 +4547,7 @@ export function App() {
         onUpdateLlmSettings={handleUpdateLlmSettings}
         onConnectGoogleWorkspace={handleConnectGoogle}
         onConnectGmailSmtp={handleConnectGmailSmtp}
+        onConnectEmailProvider={handleConnectEmailProvider}
         onSaveChannelConfig={handleSaveChannelConfig}
         onDisconnectChannel={handleDisconnectChannel}
         onManageChannelAccounts={handleManageChannelAccounts}

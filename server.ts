@@ -678,6 +678,7 @@ async function startServer() {
 
       // Save verified SMTP credentials in the encrypted vault (supports multiple Gmail accounts!)
       const vault = loadVault();
+      vault.secrets['EMAIL_ACTIVE_PROVIDER'] = encryptText('smtp');
       vault.secrets['GMAIL_SMTP_USER'] = encryptText(cleanEmail);
       vault.secrets['GMAIL_SMTP_APP_PASSWORD'] = encryptText(cleanPass);
       vault.secrets['GMAIL_SMTP_HOST'] = encryptText(host);
@@ -696,6 +697,7 @@ async function startServer() {
         createdAt: new Date().toISOString(),
         authType: 'smtp',
         encryptedSecrets: {
+          EMAIL_ACTIVE_PROVIDER: encryptText('smtp'),
           GMAIL_SMTP_USER: encryptText(cleanEmail),
           GMAIL_SMTP_APP_PASSWORD: encryptText(cleanPass),
           GMAIL_SMTP_HOST: encryptText(host),
@@ -733,13 +735,349 @@ async function startServer() {
     }
   });
 
-  app.post('/api/email/send-smtp', async (req, res) => {
-    const { to, subject, body } = req.body as {
+  // ============================================================================
+  // 3a-2. RESEND & BREVO HTTPS EMAIL API VERIFICATION (WORKS ON RENDER FREE TIER)
+  // ============================================================================
+  app.post('/api/email/verify-provider', async (req, res) => {
+    const { provider, apiKey, fromEmail, fromName } = req.body as {
+      provider?: 'resend' | 'brevo';
+      apiKey?: string;
+      fromEmail?: string;
+      fromName?: string;
+    };
+
+    const cleanProvider = provider === 'brevo' ? 'brevo' : 'resend';
+    const cleanKey = (
+      apiKey ||
+      getSecretPlain(
+        cleanProvider === 'resend' ? 'RESEND_API_KEY' : 'BREVO_API_KEY'
+      ) ||
+      ''
+    ).trim();
+
+    const defaultResendFrom = 'onboarding@resend.dev';
+    const cleanFrom = (
+      fromEmail ||
+      getSecretPlain(
+        cleanProvider === 'resend' ? 'RESEND_FROM_EMAIL' : 'BREVO_FROM_EMAIL'
+      ) ||
+      (cleanProvider === 'resend' ? defaultResendFrom : '')
+    ).trim();
+
+    const cleanName = (fromName || 'Atelier Estate').trim();
+
+    if (!cleanKey) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          cleanProvider === 'resend'
+            ? 'Paste a valid Resend API Key (starts with re_...).'
+            : 'Paste a valid Brevo V3 API Key (starts with xkeysib-...).',
+      });
+    }
+
+    if (!cleanFrom || !cleanFrom.includes('@')) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          cleanProvider === 'resend'
+            ? 'Enter a sender email address (e.g., onboarding@resend.dev or your verified Resend domain email).'
+            : 'Enter your verified Brevo sender email address.',
+      });
+    }
+
+    try {
+      let verifiedDetail = '';
+
+      if (cleanProvider === 'resend') {
+        // Verify Resend API key live against Resend REST API over HTTPS (port 443)
+        const resendRes = await fetch('https://api.resend.com/domains', {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${cleanKey}`,
+          },
+        });
+        const resendData = await resendRes.json().catch(() => ({}));
+        const errMsg = String(resendData?.message || '');
+
+        // Note: Resend "Sending access" keys return 401 with message "This API key is restricted to only send emails"
+        // which confirms the key is a valid Resend sending key! Invalid keys return "API key is invalid".
+        const isSendOnlyValidKey =
+          (resendRes.status === 401 || resendRes.status === 403) &&
+          errMsg.toLowerCase().includes('restricted to only send');
+
+        if (!resendRes.ok && !isSendOnlyValidKey) {
+          return res.status(400).json({
+            ok: false,
+            error: `Resend API rejected this key (HTTP ${resendRes.status}): ${
+              errMsg || 'Invalid Resend API Key.'
+            }`,
+          });
+        }
+
+        const domainsCount = Array.isArray(resendData?.data)
+          ? resendData.data.length
+          : 0;
+        verifiedDetail = isSendOnlyValidKey
+          ? `Verified live via Resend HTTPS API (Sending-Only Key · Sender: ${cleanFrom})`
+          : `Verified live via Resend HTTPS API (${domainsCount} domain(s) · Sender: ${cleanFrom})`;
+      } else {
+        // Verify Brevo V3 API key live against Brevo REST API over HTTPS (port 443)
+        const brevoRes = await fetch('https://api.brevo.com/v3/account', {
+          method: 'GET',
+          headers: {
+            'api-key': cleanKey,
+            Accept: 'application/json',
+          },
+        });
+        const brevoData = await brevoRes.json().catch(() => ({}));
+        if (!brevoRes.ok) {
+          return res.status(400).json({
+            ok: false,
+            error: `Brevo API rejected this key (HTTP ${brevoRes.status}): ${
+              brevoData?.message || 'Invalid Brevo V3 API Key.'
+            }`,
+          });
+        }
+        const orgName = brevoData?.companyName || brevoData?.email || 'Brevo';
+        verifiedDetail = `Verified live via Brevo HTTPS API (${orgName} · Sender: ${cleanFrom})`;
+      }
+
+      const vault = loadVault();
+      const encryptedSecrets: Record<string, string> = {
+        EMAIL_ACTIVE_PROVIDER: encryptText(cleanProvider),
+      };
+      vault.secrets['EMAIL_ACTIVE_PROVIDER'] = encryptText(cleanProvider);
+
+      if (cleanProvider === 'resend') {
+        vault.secrets['RESEND_API_KEY'] = encryptText(cleanKey);
+        vault.secrets['RESEND_FROM_EMAIL'] = encryptText(cleanFrom);
+        vault.secrets['RESEND_FROM_NAME'] = encryptText(cleanName);
+        encryptedSecrets['RESEND_API_KEY'] = encryptText(cleanKey);
+        encryptedSecrets['RESEND_FROM_EMAIL'] = encryptText(cleanFrom);
+        encryptedSecrets['RESEND_FROM_NAME'] = encryptText(cleanName);
+      } else {
+        vault.secrets['BREVO_API_KEY'] = encryptText(cleanKey);
+        vault.secrets['BREVO_FROM_EMAIL'] = encryptText(cleanFrom);
+        vault.secrets['BREVO_FROM_NAME'] = encryptText(cleanName);
+        encryptedSecrets['BREVO_API_KEY'] = encryptText(cleanKey);
+        encryptedSecrets['BREVO_FROM_EMAIL'] = encryptText(cleanFrom);
+        encryptedSecrets['BREVO_FROM_NAME'] = encryptText(cleanName);
+      }
+
+      vault.configs = vault.configs || {};
+      const existingAccounts = Array.isArray(vault.configs['gmail']?.accounts)
+        ? vault.configs['gmail']!.accounts!
+        : [];
+      const providerLabel = cleanProvider === 'resend' ? 'Resend' : 'Brevo';
+      const handleDisplay = `${cleanFrom} (${providerLabel})`;
+      const acctId = `acct_${cleanProvider}_${cleanFrom
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '_')}`;
+
+      const newAcct: StoredAccountRecord = {
+        id: acctId,
+        label: `${providerLabel} HTTPS API (${cleanFrom})`,
+        accountHandle: handleDisplay,
+        webhookUrl: '',
+        isPrimary: true,
+        verifiedDetail,
+        createdAt: new Date().toISOString(),
+        authType: 'api_key',
+        encryptedSecrets,
+      };
+
+      const mergedAccounts = [
+        newAcct,
+        ...existingAccounts
+          .filter((a) => a.id !== acctId)
+          .map((a) => ({ ...a, isPrimary: false })),
+      ];
+
+      vault.configs['gmail'] = {
+        accountHandle: handleDisplay,
+        webhookUrl: '',
+        verified: true,
+        verifiedDetail,
+        updatedAt: new Date().toISOString(),
+        accounts: mergedAccounts,
+      };
+      vault.updatedAt = new Date().toISOString();
+      saveVault(vault);
+
+      return res.json({
+        ok: true,
+        provider: cleanProvider,
+        email: handleDisplay,
+        senderEmail: cleanFrom,
+        accounts: mergedAccounts,
+        detail: verifiedDetail,
+      });
+    } catch (err: any) {
+      return res.status(400).json({
+        ok: false,
+        error: `${cleanProvider.toUpperCase()} verification failed: ${
+          err?.message || 'Network error'
+        }`,
+      });
+    }
+  });
+
+  const handleServerEmailDispatch = async (
+    req: express.Request,
+    res: express.Response
+  ) => {
+    const { to, subject, body, providerOverride } = req.body as {
       to?: string;
       subject?: string;
       body?: string;
+      providerOverride?: 'resend' | 'brevo' | 'smtp';
     };
 
+    if (!to || !to.includes('@')) {
+      return res.status(400).json({
+        ok: false,
+        error: 'A valid recipient email address is required.',
+      });
+    }
+
+    const activeProvider = (
+      providerOverride ||
+      getSecretPlain('EMAIL_ACTIVE_PROVIDER') ||
+      (getSecretPlain('RESEND_API_KEY')
+        ? 'resend'
+        : getSecretPlain('BREVO_API_KEY')
+        ? 'brevo'
+        : 'smtp')
+    ).toLowerCase();
+
+    // 1. Send via Resend HTTPS API (https://api.resend.com/emails)
+    if (activeProvider === 'resend') {
+      const resendKey = getSecretPlain('RESEND_API_KEY');
+      const resendFromEmail =
+        getSecretPlain('RESEND_FROM_EMAIL') || 'onboarding@resend.dev';
+      const resendFromName =
+        getSecretPlain('RESEND_FROM_NAME') || 'Atelier Estate';
+
+      if (!resendKey) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            'Resend API Key is not configured. Connect Resend in Connected Apps -> Email.',
+        });
+      }
+
+      try {
+        const fromHeader = resendFromName
+          ? `${resendFromName} <${resendFromEmail}>`
+          : resendFromEmail;
+
+        const resendResp = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: fromHeader,
+            to: [to.trim()],
+            subject: subject || 'Message from Atelier Estate',
+            text: body || '',
+          }),
+        });
+
+        const resendData = await resendResp.json().catch(() => ({}));
+        if (!resendResp.ok) {
+          return res.status(400).json({
+            ok: false,
+            error: `Resend API error (HTTP ${resendResp.status}): ${
+              resendData?.message ||
+              'Failed to send email via Resend. Note: With onboarding@resend.dev, Resend only sends to your own verified Resend account email unless you add a custom domain.'
+            }`,
+          });
+        }
+
+        return res.json({
+          ok: true,
+          provider: 'Resend HTTPS API',
+          id: resendData.id || `resend-${Date.now()}`,
+          from: resendFromEmail,
+          to: to.trim(),
+          accepted: [to.trim()],
+        });
+      } catch (err: any) {
+        return res.status(400).json({
+          ok: false,
+          error: `Failed to send email via Resend: ${
+            err?.message || 'HTTPS request failed'
+          }`,
+        });
+      }
+    }
+
+    // 2. Send via Brevo V3 HTTPS API (https://api.brevo.com/v3/smtp/email)
+    if (activeProvider === 'brevo') {
+      const brevoKey = getSecretPlain('BREVO_API_KEY');
+      const brevoFromEmail = getSecretPlain('BREVO_FROM_EMAIL');
+      const brevoFromName =
+        getSecretPlain('BREVO_FROM_NAME') || 'Atelier Estate';
+
+      if (!brevoKey || !brevoFromEmail) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            'Brevo API Key or Sender Email is not configured. Connect Brevo in Connected Apps -> Email.',
+        });
+      }
+
+      try {
+        const brevoResp = await fetch('https://api.brevo.com/v3/smtp/email', {
+          method: 'POST',
+          headers: {
+            'api-key': brevoKey,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            sender: {
+              name: brevoFromName,
+              email: brevoFromEmail,
+            },
+            to: [{ email: to.trim() }],
+            subject: subject || 'Message from Atelier Estate',
+            textContent: body || '',
+          }),
+        });
+
+        const brevoData = await brevoResp.json().catch(() => ({}));
+        if (!brevoResp.ok) {
+          return res.status(400).json({
+            ok: false,
+            error: `Brevo API error (HTTP ${brevoResp.status}): ${
+              brevoData?.message || 'Failed to send email via Brevo.'
+            }`,
+          });
+        }
+
+        return res.json({
+          ok: true,
+          provider: 'Brevo HTTPS API',
+          id: brevoData.messageId || `brevo-${Date.now()}`,
+          from: brevoFromEmail,
+          to: to.trim(),
+          accepted: [to.trim()],
+        });
+      } catch (err: any) {
+        return res.status(400).json({
+          ok: false,
+          error: `Failed to send email via Brevo: ${
+            err?.message || 'HTTPS request failed'
+          }`,
+        });
+      }
+    }
+
+    // 3. Default / Fallback: Send via Gmail / Custom SMTP (Nodemailer)
     const smtpUser = getSecretPlain('GMAIL_SMTP_USER');
     const smtpPass = getSecretPlain('GMAIL_SMTP_APP_PASSWORD');
     const smtpHost = getSecretPlain('GMAIL_SMTP_HOST') || 'smtp.gmail.com';
@@ -748,14 +1086,7 @@ async function startServer() {
       return res.status(400).json({
         ok: false,
         error:
-          'Gmail is not authenticated. Sign in with Google OAuth (and grant Gmail permission) OR connect your Gmail + 16-character App Password in Connected Apps -> Gmail.',
-      });
-    }
-
-    if (!to || !to.includes('@')) {
-      return res.status(400).json({
-        ok: false,
-        error: 'A valid recipient email address is required.',
+          'No email provider is connected. Connect Resend, Brevo, Google OAuth, or Gmail App Password in Connected Apps -> Gmail / Email.',
       });
     }
 
@@ -779,6 +1110,7 @@ async function startServer() {
 
       return res.json({
         ok: true,
+        provider: 'Gmail SMTP',
         id: info.messageId,
         from: smtpUser,
         to: to.trim(),
@@ -792,7 +1124,10 @@ async function startServer() {
         }`,
       });
     }
-  });
+  };
+
+  app.post('/api/email/send-smtp', handleServerEmailDispatch);
+  app.post('/api/email/send', handleServerEmailDispatch);
 
   // ============================================================================
   // 3b. REAL LIVE CHANNEL VERIFICATION ENDPOINT (Telnyx, WhatsApp, IG, FB, Maps)
@@ -2233,6 +2568,549 @@ ${JSON.stringify(reminderItems, null, 2)}`;
         detail: `❌ Network error: ${error?.message || 'Dispatch failed'}`,
       });
     }
+  });
+
+  // ============================================================================
+  // 8. B2B SaaS Portal: License Lock, Admin Key Generator & B2B Enquiries (Hostinger + VPS Ready)
+  // ============================================================================
+
+  interface B2BClientLicense {
+    id: string;
+    agencyName: string;
+    clientName: string;
+    clientEmail: string;
+    licenseKey: string;
+    planTier: 'Starter' | 'Growth' | 'Enterprise';
+    billingCycle: 'Monthly' | 'Annual' | 'Lifetime';
+    status: 'ACTIVE' | 'SUSPENDED';
+    createdAt: string;
+    expiresAt: string;
+    lastLoginAt?: string;
+    notes?: string;
+  }
+
+  interface B2BEnquiryRecord {
+    id: string;
+    agencyName: string;
+    contactName: string;
+    email: string;
+    phone: string;
+    teamSize: string;
+    monthlyLeads: string;
+    message: string;
+    source: string;
+    status: 'NEW' | 'CALL_SCHEDULED' | 'PAYMENT_PENDING' | 'PAID_UNLOCKED';
+    issuedLicenseKey?: string;
+    emailAlertStatus?: string;
+    createdAt: string;
+  }
+
+  interface B2BPortalState {
+    masterAdminKey: string;
+    settings: {
+      brandName: string;
+      tagline: string;
+      whatsappNumber: string;
+      calendlyUrl: string;
+      notificationEmail: string;
+      backendUrl: string;
+      requireLicenseLock: boolean;
+    };
+    licenses: B2BClientLicense[];
+    enquiries: B2BEnquiryRecord[];
+  }
+
+  function loadB2BPortalState(): B2BPortalState {
+    const vault = loadVault() as any;
+    if (!vault.b2bPortal) {
+      vault.b2bPortal = {
+        masterAdminKey: 'ADMIN-ESTATE-2026',
+        settings: {
+          brandName: 'Atelier Estate AI',
+          tagline: 'Autonomous 24/7 Real Estate AI Workforce & Omnichannel CRM',
+          whatsappNumber: '+15550192834',
+          calendlyUrl: 'https://calendly.com',
+          notificationEmail:
+            getSecretPlain('RESEND_FROM_EMAIL') ||
+            getSecretPlain('BREVO_FROM_EMAIL') ||
+            getSecretPlain('GMAIL_SMTP_USER') ||
+            'khushi4762@gmail.com',
+          backendUrl: '',
+          requireLicenseLock: true,
+        },
+        licenses: [
+          {
+            id: 'lic_demo_1',
+            agencyName: 'Vanguard Luxury Realty',
+            clientName: 'Alexander Sterling',
+            clientEmail: 'alex@vanguardrealty.com',
+            licenseKey: 'ESTATE-PRO-8842-VIP',
+            planTier: 'Enterprise',
+            billingCycle: 'Annual',
+            status: 'ACTIVE',
+            createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
+            expiresAt: new Date(Date.now() + 86400000 * 360).toISOString(),
+            lastLoginAt: new Date(Date.now() - 3600000 * 2).toISOString(),
+            notes: 'Paid on onboarding strategy call — 4 AI bots + Google Calendar sync enabled.',
+          },
+        ],
+        enquiries: [
+          {
+            id: 'enq_sample_1',
+            agencyName: 'Skyline Prime Properties',
+            contactName: 'Rohan Malhotra',
+            email: 'rohan@skylineprime.com',
+            phone: '+91 98201 44910',
+            teamSize: '11-25 Agents',
+            monthlyLeads: '300-800 Leads/mo',
+            message:
+              'We want to connect our Meta Ads, WhatsApp Business, and website lead capture to qualify buyers before passing to our 15 closing agents.',
+            source: 'Landing Page Strategy Form',
+            status: 'CALL_SCHEDULED',
+            emailAlertStatus: 'Logged in Admin Hub',
+            createdAt: new Date(Date.now() - 3600000 * 4).toISOString(),
+          },
+        ],
+      };
+      saveVault(vault);
+    }
+    return vault.b2bPortal as B2BPortalState;
+  }
+
+  function saveB2BPortalState(state: B2BPortalState) {
+    const vault = loadVault() as any;
+    vault.b2bPortal = state;
+    vault.updatedAt = new Date().toISOString();
+    saveVault(vault);
+  }
+
+  async function dispatchInternalEmailNotification(
+    to: string,
+    subject: string,
+    bodyText: string
+  ): Promise<{ ok: boolean; detail: string }> {
+    if (!to || !to.includes('@')) {
+      return { ok: false, detail: 'No valid recipient email' };
+    }
+    const activeProvider = (
+      getSecretPlain('EMAIL_ACTIVE_PROVIDER') ||
+      (getSecretPlain('RESEND_API_KEY')
+        ? 'resend'
+        : getSecretPlain('BREVO_API_KEY')
+        ? 'brevo'
+        : getSecretPlain('GMAIL_SMTP_APP_PASSWORD')
+        ? 'smtp'
+        : '')
+    ).toLowerCase();
+
+    try {
+      if (activeProvider === 'resend') {
+        const resendKey = getSecretPlain('RESEND_API_KEY');
+        const resendFromEmail =
+          getSecretPlain('RESEND_FROM_EMAIL') || 'onboarding@resend.dev';
+        const resendFromName =
+          getSecretPlain('RESEND_FROM_NAME') || 'Atelier Estate AI';
+        if (resendKey) {
+          const resp = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${resendKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from: `${resendFromName} <${resendFromEmail}>`,
+              to: [to.trim()],
+              subject,
+              text: bodyText,
+            }),
+          });
+          if (resp.ok) {
+            return { ok: true, detail: `Sent via Resend HTTPS API to ${to}` };
+          }
+        }
+      } else if (activeProvider === 'brevo') {
+        const brevoKey = getSecretPlain('BREVO_API_KEY');
+        const brevoFromEmail = getSecretPlain('BREVO_FROM_EMAIL');
+        const brevoFromName =
+          getSecretPlain('BREVO_FROM_NAME') || 'Atelier Estate AI';
+        if (brevoKey && brevoFromEmail) {
+          const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+            method: 'POST',
+            headers: {
+              'api-key': brevoKey,
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              sender: { name: brevoFromName, email: brevoFromEmail },
+              to: [{ email: to.trim() }],
+              subject,
+              textContent: bodyText,
+            }),
+          });
+          if (resp.ok) {
+            return { ok: true, detail: `Sent via Brevo V3 HTTPS API to ${to}` };
+          }
+        }
+      }
+    } catch (e: any) {
+      return { ok: false, detail: e?.message || 'Email notification failed' };
+    }
+    return {
+      ok: false,
+      detail: 'Email provider not yet connected (configure Resend or Brevo in Workspace Tools)',
+    };
+  }
+
+  // Enable CORS on public & auth endpoints so a Hostinger standalone website can communicate with this VPS/Render server
+  app.use(['/api/public', '/api/auth', '/api/webhooks'], (req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header(
+      'Access-Control-Allow-Headers',
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization'
+    );
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
+  app.get('/api/public/portal-config', (_req, res) => {
+    const state = loadB2BPortalState();
+    res.json({
+      ok: true,
+      settings: state.settings,
+    });
+  });
+
+  app.post('/api/public/b2b-enquiry', async (req, res) => {
+    const {
+      agencyName,
+      contactName,
+      email,
+      phone,
+      teamSize,
+      monthlyLeads,
+      message,
+      source,
+    } = req.body || {};
+
+    if (!contactName || !email || !phone) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Please provide your name, work email, and phone/WhatsApp number.',
+      });
+    }
+
+    const state = loadB2BPortalState();
+    const newEnquiry: B2BEnquiryRecord = {
+      id: `enq_${Date.now()}`,
+      agencyName: (agencyName || 'Real Estate Brokerage').trim(),
+      contactName: contactName.trim(),
+      email: email.trim(),
+      phone: phone.trim(),
+      teamSize: (teamSize || '5-10 Agents').trim(),
+      monthlyLeads: (monthlyLeads || '100-300 Leads/mo').trim(),
+      message: (
+        message || 'Interested in deploying the 24/7 AI Real Estate Workforce.'
+      ).trim(),
+      source: (source || 'Public Landing Page').trim(),
+      status: 'NEW',
+      createdAt: new Date().toISOString(),
+    };
+
+    const ownerEmail =
+      state.settings.notificationEmail ||
+      getSecretPlain('RESEND_FROM_EMAIL') ||
+      getSecretPlain('BREVO_FROM_EMAIL') ||
+      getSecretPlain('GMAIL_SMTP_USER') ||
+      '';
+
+    let emailResultDetail = 'Saved to Admin Enquiries Hub';
+    if (ownerEmail) {
+      const alertResult = await dispatchInternalEmailNotification(
+        ownerEmail,
+        `🔥 New B2B Agency Enquiry: ${newEnquiry.agencyName} (${newEnquiry.contactName})`,
+        `New Real Estate Automation Enquiry Received!\n\n` +
+          `Agency Name: ${newEnquiry.agencyName}\n` +
+          `Contact Name: ${newEnquiry.contactName}\n` +
+          `Email: ${newEnquiry.email}\n` +
+          `Phone / WhatsApp: ${newEnquiry.phone}\n` +
+          `Team Size: ${newEnquiry.teamSize}\n` +
+          `Monthly Lead Volume: ${newEnquiry.monthlyLeads}\n` +
+          `Source: ${newEnquiry.source}\n\n` +
+          `Requirements / Notes:\n${newEnquiry.message}\n\n` +
+          `Next Step: Call the prospect, collect payment, and generate their Client License Key inside your Admin License & Enquiries Hub.`
+      );
+      emailResultDetail = alertResult.detail;
+    }
+
+    // Also send confirmation email to the prospect if Resend/Brevo is connected
+    await dispatchInternalEmailNotification(
+      newEnquiry.email,
+      `We received your ${state.settings.brandName} Strategy Call Request`,
+      `Hi ${newEnquiry.contactName},\n\n` +
+        `Thank you for requesting a live strategy walkthrough of ${state.settings.brandName} for ${newEnquiry.agencyName}.\n\n` +
+        `Our engineering & onboarding specialist will connect with you on call/WhatsApp (${newEnquiry.phone}) shortly to walk you through the 4 AI Employees, connect your channels, and activate your dedicated Client License Key.\n\n` +
+        `Best regards,\n${state.settings.brandName} Team`
+    );
+
+    newEnquiry.emailAlertStatus = emailResultDetail;
+    state.enquiries = [newEnquiry, ...state.enquiries];
+    saveB2BPortalState(state);
+
+    res.json({
+      ok: true,
+      enquiry: newEnquiry,
+      emailAlertStatus: emailResultDetail,
+      whatsappNumber: state.settings.whatsappNumber,
+      calendlyUrl: state.settings.calendlyUrl,
+    });
+  });
+
+  app.post('/api/auth/verify-license', (req, res) => {
+    const { licenseKey, email } = req.body || {};
+    const cleanKey = String(licenseKey || '').trim();
+    const cleanEmail = String(email || '')
+      .trim()
+      .toLowerCase();
+
+    if (!cleanKey) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Please enter a valid License Key or Master Admin Key.',
+      });
+    }
+
+    const state = loadB2BPortalState();
+
+    // 1. Check Master Admin Key
+    if (cleanKey === state.masterAdminKey) {
+      return res.json({
+        ok: true,
+        role: 'ADMIN',
+        session: {
+          role: 'ADMIN',
+          agencyName: `${state.settings.brandName} (Master Admin)`,
+          clientName: 'System Owner / Admin',
+          clientEmail: cleanEmail || state.settings.notificationEmail,
+          licenseKey: cleanKey,
+          planTier: 'Enterprise',
+        },
+      });
+    }
+
+    // 2. Check Client Licenses
+    const matched = state.licenses.find(
+      (lic) => lic.licenseKey.toUpperCase() === cleanKey.toUpperCase()
+    );
+
+    if (!matched) {
+      return res.status(401).json({
+        ok: false,
+        error:
+          'Invalid License Key. Please book a discovery call and complete payment to receive your activation key.',
+      });
+    }
+
+    if (matched.status !== 'ACTIVE') {
+      return res.status(403).json({
+        ok: false,
+        error:
+          'This License Key is currently SUSPENDED. Please contact billing support to reactivate your automation.',
+      });
+    }
+
+    if (
+      cleanEmail &&
+      matched.clientEmail &&
+      matched.clientEmail.toLowerCase() !== cleanEmail
+    ) {
+      return res.status(401).json({
+        ok: false,
+        error: `This License Key is registered to a different agency email address.`,
+      });
+    }
+
+    matched.lastLoginAt = new Date().toISOString();
+    saveB2BPortalState(state);
+
+    return res.json({
+      ok: true,
+      role: 'CLIENT',
+      session: {
+        role: 'CLIENT',
+        agencyName: matched.agencyName,
+        clientName: matched.clientName,
+        clientEmail: matched.clientEmail,
+        licenseKey: matched.licenseKey,
+        planTier: matched.planTier,
+      },
+    });
+  });
+
+  app.get('/api/admin/portal-data', (_req, res) => {
+    const state = loadB2BPortalState();
+    res.json({
+      ok: true,
+      masterAdminKey: state.masterAdminKey,
+      settings: state.settings,
+      licenses: state.licenses,
+      enquiries: state.enquiries,
+    });
+  });
+
+  app.post('/api/admin/settings', (req, res) => {
+    const { settings, masterAdminKey } = req.body || {};
+    const state = loadB2BPortalState();
+    if (settings && typeof settings === 'object') {
+      state.settings = {
+        ...state.settings,
+        ...settings,
+      };
+    }
+    if (masterAdminKey && String(masterAdminKey).trim().length >= 4) {
+      state.masterAdminKey = String(masterAdminKey).trim();
+    }
+    saveB2BPortalState(state);
+    res.json({
+      ok: true,
+      masterAdminKey: state.masterAdminKey,
+      settings: state.settings,
+    });
+  });
+
+  app.post('/api/admin/licenses/create', async (req, res) => {
+    const {
+      agencyName,
+      clientName,
+      clientEmail,
+      planTier,
+      billingCycle,
+      notes,
+      enquiryId,
+      sendEmailToClient,
+    } = req.body || {};
+
+    if (!agencyName || !clientEmail) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Agency Name and Client Email are required to generate a license key.',
+      });
+    }
+
+    const randomPart1 = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const randomPart2 = Math.floor(1000 + Math.random() * 9000);
+    const tierPrefix =
+      planTier === 'Enterprise'
+        ? 'ENT'
+        : planTier === 'Starter'
+        ? 'STR'
+        : 'PRO';
+    const generatedKey = `ESTATE-${tierPrefix}-${randomPart2}-${randomPart1}`;
+
+    const daysValid =
+      billingCycle === 'Lifetime'
+        ? 3650
+        : billingCycle === 'Annual'
+        ? 365
+        : 30;
+
+    const newLicense: B2BClientLicense = {
+      id: `lic_${Date.now()}`,
+      agencyName: String(agencyName).trim(),
+      clientName: String(clientName || agencyName).trim(),
+      clientEmail: String(clientEmail).trim(),
+      licenseKey: generatedKey,
+      planTier: planTier || 'Growth',
+      billingCycle: billingCycle || 'Monthly',
+      status: 'ACTIVE',
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86400000 * daysValid).toISOString(),
+      notes: String(notes || 'Payment verified on call.').trim(),
+    };
+
+    const state = loadB2BPortalState();
+    state.licenses = [newLicense, ...state.licenses];
+
+    if (enquiryId) {
+      state.enquiries = state.enquiries.map((enq) =>
+        enq.id === enquiryId
+          ? {
+              ...enq,
+              status: 'PAID_UNLOCKED',
+              issuedLicenseKey: generatedKey,
+            }
+          : enq
+      );
+    }
+
+    saveB2BPortalState(state);
+
+    let emailDeliveryNote = '';
+    if (sendEmailToClient !== false && newLicense.clientEmail.includes('@')) {
+      const dispatchRes = await dispatchInternalEmailNotification(
+        newLicense.clientEmail,
+        `🎉 Your ${state.settings.brandName} License Key & Portal Access (${newLicense.agencyName})`,
+        `Welcome to ${state.settings.brandName}, ${newLicense.clientName}!\n\n` +
+          `Your payment and onboarding setup for ${newLicense.agencyName} (${newLicense.planTier} - ${newLicense.billingCycle}) have been verified.\n\n` +
+          `=========================================\n` +
+          `CLIENT EMAIL: ${newLicense.clientEmail}\n` +
+          `LICENSE KEY:  ${newLicense.licenseKey}\n` +
+          `=========================================\n\n` +
+          `How to Unlock Your AI Workforce:\n` +
+          `1. Open the portal and click "Client Portal Login (Unlock System)".\n` +
+          `2. Enter your Client Email and License Key above.\n` +
+          `3. Connect your WhatsApp, Instagram, Website Webhook, and Google Calendar.\n\n` +
+          `Welcome aboard,\n${state.settings.brandName} Team`
+      );
+      emailDeliveryNote = dispatchRes.detail;
+    }
+
+    res.json({
+      ok: true,
+      license: newLicense,
+      licenses: state.licenses,
+      enquiries: state.enquiries,
+      emailDeliveryNote,
+    });
+  });
+
+  app.post('/api/admin/licenses/toggle', (req, res) => {
+    const { licenseId, action } = req.body || {};
+    const state = loadB2BPortalState();
+
+    if (action === 'DELETE') {
+      state.licenses = state.licenses.filter((l) => l.id !== licenseId);
+    } else {
+      state.licenses = state.licenses.map((l) =>
+        l.id === licenseId
+          ? {
+              ...l,
+              status: l.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE',
+            }
+          : l
+      );
+    }
+    saveB2BPortalState(state);
+    res.json({
+      ok: true,
+      licenses: state.licenses,
+    });
+  });
+
+  app.post('/api/admin/enquiries/status', (req, res) => {
+    const { enquiryId, status } = req.body || {};
+    const state = loadB2BPortalState();
+    state.enquiries = state.enquiries.map((e) =>
+      e.id === enquiryId ? { ...e, status } : e
+    );
+    saveB2BPortalState(state);
+    res.json({
+      ok: true,
+      enquiries: state.enquiries,
+    });
   });
 
   if (process.env.NODE_ENV !== 'production') {
