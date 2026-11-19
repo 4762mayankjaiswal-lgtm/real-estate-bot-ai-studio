@@ -39,6 +39,8 @@ import {
   Globe,
   PanelRightClose,
   PanelRightOpen,
+  ExternalLink,
+  BookOpen,
 } from 'lucide-react';
 import {
   AIEmployee,
@@ -98,6 +100,7 @@ import {
   ActiveLicenseSession,
 } from './components/LandingPageView';
 import { AdminLicenseEnquiriesView } from './components/AdminLicenseEnquiriesView';
+import { AutomationBlueprintGuide } from './components/AutomationBlueprintGuide';
 
 type MainTab =
   | 'chat'
@@ -105,6 +108,7 @@ type MainTab =
   | 'leads'
   | 'human_agents'
   | 'performance'
+  | 'setup_guide'
   | 'b2b_portal';
 
 
@@ -180,8 +184,9 @@ export function App() {
       }
       return null;
     });
-  const [showPublicLandingPage, setShowPublicLandingPage] =
-    useState<boolean>(true);
+  const [showPublicLandingPage, setShowPublicLandingPage] = useState<boolean>(
+    () => !Boolean(localStorage.getItem('atelier_license_session_v1'))
+  );
 
   // 2. State: Properties Database (CRUD)
   const [properties, setProperties] = useState<PropertyListing[]>(() => {
@@ -216,23 +221,21 @@ export function App() {
     return INITIAL_LEADS;
   });
 
-  // 4. State: Connected Apps (Starts 100% Blank & Unconnected until verified live; includes website_leads & multi-account support)
+  // 4. State: Connected Apps (Starts 100% Blank & Unconnected until verified live by /api/vault/status)
   const [tools, setTools] = useState<ToolConnection[]>(() => {
-    const saved = localStorage.getItem('atelier_tools_v9');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (
-          Array.isArray(parsed) &&
-          parsed.some((t: any) => t.id === 'website_leads')
-        ) {
-          return parsed;
-        }
-      } catch {
-        // fallback
-      }
+    try {
+      localStorage.removeItem('atelier_tools_v9');
+    } catch {
+      // ignore storage errors
     }
-    return INITIAL_TOOL_CONNECTIONS;
+    return INITIAL_TOOL_CONNECTIONS.map((t) => ({
+      ...t,
+      connected: false,
+      accountHandle: '',
+      webhookUrl: '',
+      accounts: [],
+      lastSync: 'Not connected',
+    }));
   });
 
   // 4b. State: Human Real Estate Agents (With Contact Info & Direct Google Calendar Sync)
@@ -260,7 +263,7 @@ export function App() {
     }
     return INITIAL_BOT_LOGS;
   });
-  const [logsSidePanelOpen, setLogsSidePanelOpen] = useState<boolean>(true);
+  const [logsSidePanelOpen, setLogsSidePanelOpen] = useState<boolean>(false);
   const [logsDropdownOpen, setLogsDropdownOpen] = useState<boolean>(false);
 
   const appendBotLog = (entry: {
@@ -341,11 +344,19 @@ export function App() {
   const [appsDropdownOpen, setAppsDropdownOpen] = useState(false);
   const [onboardingModalOpen, setOnboardingModalOpen] = useState(false);
   const [onboardingChannel, setOnboardingChannel] = useState<
-    ToolId | 'llm_engine'
+    ToolId | 'llm_engine' | 'webhook_health' | 'step_by_step_guide'
   >('llm_engine');
+  const [guideHandle, setGuideHandle] = useState('');
+  const [guideWebhookUrl, setGuideWebhookUrl] = useState('');
+  const [guideSaving, setGuideSaving] = useState(false);
+  const [guideFeedback, setGuideFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
-  // 8. Custom Bot Creation Modal
+  // 8. Custom Bot Creation & Edit Modal
   const [newBotModalOpen, setNewBotModalOpen] = useState(false);
+  const [editingBotId, setEditingBotId] = useState<string | null>(null);
   const [newBotName, setNewBotName] = useState('');
   const [newBotRole, setNewBotRole] = useState('');
   const [newBotSpecialty, setNewBotSpecialty] = useState('');
@@ -490,29 +501,80 @@ export function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
 
-  // Persist changes to localStorage
+  // Hydrate workspace state from Backend (/api/brokerage/workspace) on mount
+  const hydratedFromServerRef = useRef(false);
+  useEffect(() => {
+    fetch('/api/brokerage/workspace')
+      .then((r) => r.json())
+      .then((data) => {
+        const ws = data?.workspace;
+        if (ws) {
+          if (Array.isArray(ws.employees) && ws.employees.length > 0) {
+            setEmployees(ws.employees);
+          }
+          if (Array.isArray(ws.humanAgents)) {
+            setHumanAgents(ws.humanAgents);
+          }
+          if (Array.isArray(ws.properties)) {
+            setProperties(ws.properties);
+          }
+          if (Array.isArray(ws.leads)) {
+            setLeads(ws.leads);
+          }
+          if (Array.isArray(ws.reminders)) {
+            setReminders(ws.reminders);
+          }
+          if (Array.isArray(ws.scheduledMeetings)) {
+            setScheduledMeetings(ws.scheduledMeetings);
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        hydratedFromServerRef.current = true;
+      });
+  }, []);
+
+  // Persist changes to localStorage AND sync to Node/Express Backend (/api/brokerage/workspace)
   useEffect(() => {
     localStorage.setItem('atelier_employees_v5', JSON.stringify(employees));
-  }, [employees]);
-
-  useEffect(() => {
     localStorage.setItem('atelier_properties_v5', JSON.stringify(properties));
-  }, [properties]);
-
-  useEffect(() => {
     localStorage.setItem('atelier_leads_v5', JSON.stringify(leads));
-  }, [leads]);
-
-  useEffect(() => {
-    localStorage.setItem('atelier_tools_v9', JSON.stringify(tools));
-  }, [tools]);
-
-  useEffect(() => {
     localStorage.setItem(
       'atelier_human_agents_v9',
       JSON.stringify(humanAgents)
     );
-  }, [humanAgents]);
+    localStorage.setItem('atelier_reminders_v8', JSON.stringify(reminders));
+    localStorage.setItem(
+      'atelier_scheduled_meetings_v10',
+      JSON.stringify(scheduledMeetings)
+    );
+
+    if (!hydratedFromServerRef.current) return;
+    fetch('/api/brokerage/workspace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        employees,
+        humanAgents,
+        properties,
+        leads,
+        reminders,
+        scheduledMeetings,
+      }),
+    }).catch(() => {});
+  }, [
+    employees,
+    properties,
+    leads,
+    humanAgents,
+    reminders,
+    scheduledMeetings,
+  ]);
+
+  useEffect(() => {
+    localStorage.setItem('atelier_tools_v10_strict', JSON.stringify(tools));
+  }, [tools]);
 
   useEffect(() => {
     localStorage.setItem('atelier_bot_logs_v9', JSON.stringify(botLogs));
@@ -521,17 +583,6 @@ export function App() {
   useEffect(() => {
     localStorage.setItem('atelier_chats_v5', JSON.stringify(chatHistories));
   }, [chatHistories]);
-
-  useEffect(() => {
-    localStorage.setItem('atelier_reminders_v8', JSON.stringify(reminders));
-  }, [reminders]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      'atelier_scheduled_meetings_v10',
-      JSON.stringify(scheduledMeetings)
-    );
-  }, [scheduledMeetings]);
 
   // Background Poller: Sync Inbound Leads from Agency Website Webhook (/api/webhooks/website-leads)
   useEffect(() => {
@@ -1267,8 +1318,8 @@ export function App() {
               throw new Error(smtpData.error || 'SMTP send failed');
             }
             action.executed = true;
-            action.executionResult = `Delivered via Gmail SMTP (Message ID: ${smtpData.id})`;
-            extraExecutionNote = `✅ REAL EMAIL SENT to ${recipient} from ${smtpData.from}\nSubject: "${subject}"\nSMTP Message ID: ${smtpData.id}`;
+            action.executionResult = `Delivered via ${smtpData.provider || 'Email Server'} (Message ID: ${smtpData.id})`;
+            extraExecutionNote = `✅ REAL EMAIL SENT to ${recipient} from ${smtpData.from}\nSubject: "${subject}"\nMessage ID: ${smtpData.id}`;
             appendBotLog({
               employeeId: activeEmployee.id,
               category: matchedHumanAgent
@@ -1278,12 +1329,12 @@ export function App() {
               title: matchedHumanAgent
                 ? `Briefed Human Agent: ${matchedHumanAgent.name}`
                 : `Delivered Email to ${recipient}`,
-              detail: `Subject: "${subject}" · SMTP Message ID: ${smtpData.id}`,
-              channelOrTool: 'Gmail SMTP',
+              detail: `Subject: "${subject}" · Message ID: ${smtpData.id}`,
+              channelOrTool: smtpData.provider || 'Email API',
             });
           } else {
             throw new Error(
-              'Gmail is NOT connected with a real Google OAuth token or Google App Password.'
+              'Email / Gmail is NOT connected. Connect Resend, Brevo, Google OAuth, or Gmail App Password first.'
             );
           }
         } catch (emailErr: any) {
@@ -1291,15 +1342,171 @@ export function App() {
           extraExecutionNote = `❌ EMAIL WAS NOT SENT to ${
             recipient || '(recipient)'
           }.\nReason: ${
-            emailErr?.message || 'Gmail not authenticated'
-          }\n\n👉 Click "Sign In" in the bottom-left corner to connect your Google Account (via Google OAuth 2.0 OR a 16-character Google App Password), then click "Approve & Run Action" below.`;
+            emailErr?.message || 'Email not connected'
+          }\n\n👉 Click "Connected Apps & Website" in the bottom-left corner -> "Email & Gmail" to connect Resend, Brevo, Google OAuth, or a Gmail App Password.`;
           appendBotLog({
             employeeId: activeEmployee.id,
             category: matchedHumanAgent ? 'HUMAN_AGENT_HANDOFF' : 'EMAIL_SENT',
             status: 'ERROR',
             title: `Email Dispatch Blocked (${recipient || 'recipient'})`,
-            detail: emailErr?.message || 'Gmail not authenticated.',
-            channelOrTool: 'Gmail',
+            detail: emailErr?.message || 'Email not connected.',
+            channelOrTool: 'Gmail / Email',
+          });
+        }
+      } else if (action.actionType === 'WEBHOOK_OR_SMS_DISPATCH') {
+        const chId = ((action.targetChannel || 'whatsapp').toLowerCase()) as ToolId;
+        const toolObj = tools.find((t) => t.id === chId);
+        const channelLabel = toolObj?.name || chId.toUpperCase();
+        const recipient = (
+          action.recipientPhoneOrHandle ||
+          leads[0]?.phone ||
+          ''
+        ).trim();
+        const messageBody = (action.smsOrPostBody || data.reply || '').trim();
+
+        if (!toolObj?.connected) {
+          action.executed = false;
+          action.executionResult = `Blocked: ${channelLabel} is NOT connected yet.`;
+          extraExecutionNote = `❌ MESSAGE WAS NOT SENT VIA ${channelLabel.toUpperCase()}.\nReason: ${channelLabel} is currently NOT connected.\n\n👉 Click "Step-by-Step Setup & Templates" in the top bar (or "Connected Apps & Website" -> "${channelLabel}") to either:\n1. Download our 1-Click Make.com / n8n Automation Blueprint (.json) pre-configured with your CRM URL, OR\n2. Paste your Official ${channelLabel} API Key.`;
+          appendBotLog({
+            employeeId: activeEmployee.id,
+            category: 'AI_TASK',
+            status: 'ERROR',
+            title: `${channelLabel} Dispatch Blocked (Not Connected)`,
+            detail: `Attempted to message ${recipient || 'recipient'} via ${channelLabel}, but ${channelLabel} is not connected.`,
+            channelOrTool: channelLabel,
+          });
+        } else {
+          try {
+            const dispRes = await fetch('/api/channels/dispatch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                channelId: chId,
+                recipient,
+                messageBody,
+                webhookUrl: toolObj.webhookUrl || '',
+              }),
+            });
+            const dispData = await dispRes.json();
+            if (!dispRes.ok || !dispData.ok) {
+              throw new Error(
+                dispData.detail || `${channelLabel} dispatch failed.`
+              );
+            }
+            action.executed = true;
+            action.executionResult = dispData.detail;
+            action.dispatchMode = dispData.mode;
+            extraExecutionNote = dispData.detail;
+            appendBotLog({
+              employeeId: activeEmployee.id,
+              category: 'AI_TASK',
+              status: 'SUCCESS',
+              title: `Dispatched via ${channelLabel}`,
+              detail: dispData.detail,
+              channelOrTool: channelLabel,
+            });
+          } catch (dispErr: any) {
+            action.executed = false;
+            action.executionResult =
+              dispErr?.message || `${channelLabel} dispatch failed.`;
+            extraExecutionNote = `❌ ${channelLabel.toUpperCase()} DISPATCH FAILED.\n${
+              dispErr?.message || 'Check your connection credentials.'
+            }`;
+            appendBotLog({
+              employeeId: activeEmployee.id,
+              category: 'AI_TASK',
+              status: 'ERROR',
+              title: `${channelLabel} Dispatch Error`,
+              detail: dispErr?.message || 'Dispatch failed',
+              channelOrTool: channelLabel,
+            });
+          }
+        }
+      } else if (action.actionType === 'MAPS_SEARCH') {
+        const mapsTool = tools.find((t) => t.id === 'google_maps');
+        if (!mapsTool?.connected) {
+          action.executed = false;
+          action.executionResult =
+            'Blocked: Google Maps Grounding API is NOT connected.';
+          extraExecutionNote = `❌ GOOGLE MAPS SEARCH WAS NOT RUN.\nReason: Google Maps is currently NOT connected.\n\n👉 Click "Connected Apps & Website" -> "Google Maps" and paste your Google / Gemini API Key (AIza...).`;
+          appendBotLog({
+            employeeId: activeEmployee.id,
+            category: 'AI_TASK',
+            status: 'ERROR',
+            title: 'Google Maps Lookup Blocked (Not Connected)',
+            detail:
+              'Google Maps is not connected. Paste a Google API key (AIza...) in Connected Apps -> Google Maps.',
+            channelOrTool: 'Google Maps',
+          });
+        } else {
+          try {
+            const mapsResp = await fetch('/api/maps/grounding', {
+              method: 'POST',
+              headers: getAiRequestHeaders(),
+              body: JSON.stringify({
+                query: action.mapsQuery || textToSend,
+                location: action.mapsLocation || mapsTool.accountHandle || '',
+              }),
+            });
+            const mapsData = await mapsResp.json();
+            if (!mapsResp.ok || !mapsData.ok) {
+              throw new Error(mapsData.summary || 'Google Maps lookup failed.');
+            }
+            action.executed = true;
+            action.executionResult = mapsData.summary;
+            action.mapsPlaces = mapsData.places || [];
+            extraExecutionNote = `✅ Live Google Maps Grounding Result:\n${mapsData.summary}`;
+            appendBotLog({
+              employeeId: activeEmployee.id,
+              category: 'AI_TASK',
+              status: 'SUCCESS',
+              title: `Google Maps Grounding: ${action.mapsQuery || 'Lookup'}`,
+              detail: (mapsData.summary || '').slice(0, 180),
+              channelOrTool: 'Google Maps',
+            });
+          } catch (mapsErr: any) {
+            action.executed = false;
+            extraExecutionNote = `❌ Google Maps Error: ${
+              mapsErr?.message || 'Unable to run Maps grounding.'
+            }`;
+            appendBotLog({
+              employeeId: activeEmployee.id,
+              category: 'AI_TASK',
+              status: 'ERROR',
+              title: 'Google Maps Grounding Failed',
+              detail: mapsErr?.message || 'Error',
+              channelOrTool: 'Google Maps',
+            });
+          }
+        }
+      } else if (action.actionType === 'CALENDAR_CREATE') {
+        const calConnected = Boolean(
+          googleToken ||
+            gmailSmtpVerified ||
+            tools.find((t) => t.id === 'google_calendar')?.connected ||
+            tools.find((t) => t.id === 'gmail')?.connected
+        );
+        if (!calConnected) {
+          action.executed = false;
+          extraExecutionNote = `⚠️ CALENDAR / EMAIL NOT CONNECTED YET.\nI prepared the showing details below, but no calendar invite was emailed because neither Google Calendar nor Email is connected yet.\n\n👉 Connect your Email (Resend, Brevo, or Gmail) or Google Calendar in "Connected Apps & Website", then click "Approve & Run Action" below.`;
+          appendBotLog({
+            employeeId: activeEmployee.id,
+            category: 'CALENDAR_SYNC',
+            status: 'WARNING',
+            title: 'Calendar Invite Pending Connection',
+            detail:
+              'Connect Email or Google Calendar to dispatch real .ics showing invites.',
+            channelOrTool: 'Google Calendar',
+          });
+        } else {
+          appendBotLog({
+            employeeId: activeEmployee.id,
+            category: 'CALENDAR_SYNC',
+            status: 'SUCCESS',
+            title: `Prepared Showing Invite: ${action.eventSummary || 'Property Tour'}`,
+            detail: `Click "Approve & Run Action" in chat to confirm conflict check and dispatch the calendar invite.`,
+            channelOrTool: 'Google Calendar',
           });
         }
       } else {
@@ -1457,6 +1664,10 @@ export function App() {
                   ...m.proposedAction!,
                   executed: true,
                   executionResult: dispatchData.detail,
+                  directLaunchUrl:
+                    dispatchData.directLaunchUrl ||
+                    m.proposedAction?.directLaunchUrl,
+                  dispatchMode: dispatchData.mode,
                 },
               }
             : m
@@ -1546,27 +1757,6 @@ export function App() {
           );
         }
 
-        let token = googleToken;
-        if (!token) {
-          const auth = await connectGoogleWorkspace();
-          setGoogleEmail(auth.userEmail);
-          setGoogleToken(auth.accessToken);
-          token = auth.accessToken;
-        }
-
-        const res = await createCalendarShowingEvent({
-          accessToken: token!,
-          summary: editedPayload.eventSummary,
-          description: editedPayload.eventDescription,
-          startIso,
-          endIso,
-          attendeeEmails: [
-            ...(chosenAgent?.email ? [chosenAgent.email] : []),
-            ...(editedPayload.attendeeEmail ? [editedPayload.attendeeEmail] : []),
-          ],
-          calendarId: chosenAgent?.calendarId || 'primary',
-        });
-
         const matchedLead = leads.find(
           (l) =>
             editedPayload.attendeeEmail &&
@@ -1574,8 +1764,63 @@ export function App() {
               editedPayload.attendeeEmail.toLowerCase()
         );
 
+        // Dispatch Owner-Driven .ics Calendar Invite via Backend (Resend / Brevo / SMTP — No Employee Login Required!)
+        const serverBookResp = await fetch('/api/calendar/book-agent-meeting', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: editedPayload.eventSummary || 'Property Showing',
+            description: editedPayload.eventDescription || '',
+            propertyTitle:
+              matchedLead?.propertyInterest ||
+              properties[0]?.title ||
+              'Luxury Listing',
+            startIso,
+            endIso,
+            durationMinutes,
+            agentId: chosenAgent?.id || 'agent-1',
+            agentName: chosenAgent?.name || 'Victoria Sterling',
+            agentEmail: chosenAgent?.email || '',
+            agentPhone: chosenAgent?.phone || '',
+            leadId: matchedLead?.id,
+            leadName:
+              matchedLead?.name || editedPayload.attendeeEmail || 'Buyer',
+            leadEmail: editedPayload.attendeeEmail || '',
+          }),
+        });
+        const serverBookData = await serverBookResp.json();
+        if (!serverBookResp.ok || !serverBookData.ok) {
+          throw new Error(
+            serverBookData.error || 'Failed to schedule showing on master calendar.'
+          );
+        }
+
+        // If the brokerage owner also connected their own Google OAuth token, sync to their master calendar too
+        let finalLink = serverBookData.htmlLink;
+        if (googleToken) {
+          try {
+            const gRes = await createCalendarShowingEvent({
+              accessToken: googleToken,
+              summary: editedPayload.eventSummary,
+              description: editedPayload.eventDescription,
+              startIso,
+              endIso,
+              attendeeEmails: [
+                ...(chosenAgent?.email ? [chosenAgent.email] : []),
+                ...(editedPayload.attendeeEmail
+                  ? [editedPayload.attendeeEmail]
+                  : []),
+              ],
+              calendarId: 'primary',
+            });
+            if (gRes.htmlLink) finalLink = gRes.htmlLink;
+          } catch {
+            // Keep server .ics invite link
+          }
+        }
+
         const newMeetingRecord: ScheduledMeetingRecord = {
-          id: `mtg-${Date.now()}`,
+          id: serverBookData.meeting?.id || `mtg-${Date.now()}`,
           title: editedPayload.eventSummary || 'Property Showing',
           startIso,
           endIso,
@@ -1583,7 +1828,7 @@ export function App() {
           agentId: chosenAgent?.id || 'agent-1',
           agentName: chosenAgent?.name || 'Victoria Sterling',
           agentEmail: chosenAgent?.email || '',
-          calendarId: chosenAgent?.calendarId || 'primary',
+          calendarId: chosenAgent?.email || 'brokerage-master',
           leadId: matchedLead?.id,
           leadName: matchedLead?.name || editedPayload.attendeeEmail || 'Buyer',
           leadEmail: editedPayload.attendeeEmail || '',
@@ -1591,8 +1836,8 @@ export function App() {
             matchedLead?.propertyInterest ||
             properties[0]?.title ||
             'Luxury Listing',
-          source: 'Google Calendar',
-          htmlLink: res.htmlLink,
+          source: serverBookData.meeting?.source || 'Master Schedule (.ics Invite)',
+          htmlLink: finalLink,
         };
         setScheduledMeetings((prev) => [newMeetingRecord, ...prev]);
 
@@ -1614,17 +1859,17 @@ export function App() {
           employeeId: 'maya',
           category: 'CALENDAR_SYNC',
           status: 'SUCCESS',
-          title: `Conflict-Validated Showing Booked: ${editedPayload.eventSummary}`,
-          detail: `Verified no conflicts on ${chosenAgent?.name}’s calendar or ${matchedLead?.name || editedPayload.attendeeEmail}’s history. Event Link: ${res.htmlLink}`,
-          channelOrTool: 'Google Calendar',
+          title: `Showing Assigned to ${chosenAgent?.name}: ${editedPayload.eventSummary}`,
+          detail: `${serverBookData.dispatchedSummary}. Invite Link: ${finalLink}`,
+          channelOrTool: 'Calendar Invite (.ics)',
         });
 
         const confirmMsg: EmployeeChatMessage = {
           id: `ws-${Date.now()}`,
           sender: 'employee',
-          text: `✅ Conflict check passed! Scheduled calendar showing "${editedPayload.eventSummary}" on ${chosenAgent?.name || 'Agent'}’s calendar with ${editedPayload.attendeeEmail}. Event Link: ${res.htmlLink}`,
+          text: `✅ Conflict check passed! Assigned showing "${editedPayload.eventSummary}" to human agent ${chosenAgent?.name || 'Agent'} (${chosenAgent?.email || ''}) and buyer ${editedPayload.attendeeEmail || ''}. ${serverBookData.dispatchedSummary}.`,
           timestamp: 'Just now',
-          actionBadge: 'Calendar Event Created',
+          actionBadge: 'Calendar Invite Dispatched',
         };
         setChatHistories((prev) => ({
           ...prev,
@@ -1856,53 +2101,129 @@ export function App() {
   };
 
   // ============================================================================
-  // ADD CUSTOM BOT
+  // CREATE, EDIT & DELETE AI EMPLOYEES (BOTS)
   // ============================================================================
+  const openCreateBotModal = () => {
+    setEditingBotId(null);
+    setNewBotName('');
+    setNewBotRole('');
+    setNewBotSpecialty('');
+    setNewBotPrompt('');
+    setNewBotModalOpen(true);
+  };
+
+  const openEditBotModal = (emp: AIEmployee) => {
+    setEditingBotId(emp.id);
+    setNewBotName(emp.name);
+    setNewBotRole(emp.role);
+    setNewBotSpecialty(emp.specialty);
+    setNewBotPrompt(emp.systemPrompt || '');
+    setNewBotModalOpen(true);
+  };
+
+  const handleDeleteBot = (botId: string) => {
+    if (employees.length <= 1) {
+      return;
+    }
+    const target = employees.find((e) => e.id === botId);
+    const remaining = employees.filter((e) => e.id !== botId);
+    setEmployees(remaining);
+    if (selectedEmployeeId === botId && remaining[0]) {
+      setSelectedEmployeeId(remaining[0].id);
+    }
+    if (target) {
+      appendBotLog({
+        employeeId: remaining[0]?.id || 'clara',
+        category: 'SYSTEM',
+        status: 'WARNING',
+        title: `Removed AI Employee: ${target.name}`,
+        detail: `Deleted AI Employee "${target.name}" (${target.role}) from workspace roster.`,
+        channelOrTool: 'AI Workforce Roster',
+      });
+    }
+  };
+
   const handleCreateBot = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBotName.trim() || !newBotRole.trim()) return;
-    const id = `bot_${Date.now()}`;
-    const newEmp: AIEmployee = {
-      id,
-      name: newBotName.trim(),
-      role: newBotRole.trim(),
-      title: newBotRole.trim(),
-      specialty:
-        newBotSpecialty.trim() || 'Real Estate Operations & Client Support',
-      avatarInitials: newBotName
-        .trim()
-        .split(' ')
-        .map((w) => w[0])
-        .join('')
-        .toUpperCase()
-        .slice(0, 2),
-      accentColor: '#0F172A',
-      status: 'active',
-      currentAction: 'Ready for instructions',
-      metrics: { actionsToday: 0, responseTime: '0.8s' },
-      connectedTools: ['gmail', 'google_calendar', 'google_maps', 'whatsapp'],
-      samplePrompts: [
-        `Add a new lead to our CRM database`,
-        `Draft a follow-up email for our top buyer lead`,
-        `Search nearby comps and schools on Google Maps`,
-      ],
-      systemPrompt:
-        newBotPrompt.trim() ||
-        `You are ${newBotName.trim()}, ${newBotRole.trim()} at Atelier Estate. Help manage leads, properties, emails, and calls.`,
-    };
-    setEmployees((prev) => [...prev, newEmp]);
-    setChatHistories((prev) => ({
-      ...prev,
-      [id]: [
-        {
-          id: `welcome-${id}`,
-          sender: 'employee',
-          text: `Hello! I'm ${newEmp.name}, your new ${newEmp.role}. How can I help your brokerage today?`,
-          timestamp: 'Just now',
-        },
-      ],
-    }));
-    setSelectedEmployeeId(id);
+    const initials = newBotName
+      .trim()
+      .split(' ')
+      .map((w) => w[0])
+      .join('')
+      .toUpperCase()
+      .slice(0, 2);
+
+    if (editingBotId) {
+      setEmployees((prev) =>
+        prev.map((emp) =>
+          emp.id === editingBotId
+            ? {
+                ...emp,
+                name: newBotName.trim(),
+                role: newBotRole.trim(),
+                title: newBotRole.trim(),
+                avatarInitials: initials || emp.avatarInitials,
+                specialty:
+                  newBotSpecialty.trim() ||
+                  'Real Estate Operations & Client Support',
+                systemPrompt:
+                  newBotPrompt.trim() ||
+                  `You are ${newBotName.trim()}, ${newBotRole.trim()} at Atelier Estate. Help manage leads, properties, emails, and calls.`,
+              }
+            : emp
+        )
+      );
+      appendBotLog({
+        employeeId: editingBotId,
+        employeeName: newBotName.trim(),
+        employeeRole: newBotRole.trim(),
+        category: 'SYSTEM',
+        status: 'SUCCESS',
+        title: `Updated AI Employee: ${newBotName.trim()}`,
+        detail: `Role: ${newBotRole.trim()} · Specialty: ${newBotSpecialty.trim()}`,
+        channelOrTool: 'AI Workforce Roster',
+      });
+    } else {
+      const id = `bot_${Date.now()}`;
+      const newEmp: AIEmployee = {
+        id,
+        name: newBotName.trim(),
+        role: newBotRole.trim(),
+        title: newBotRole.trim(),
+        specialty:
+          newBotSpecialty.trim() || 'Real Estate Operations & Client Support',
+        avatarInitials: initials || 'AI',
+        accentColor: '#0F172A',
+        status: 'active',
+        currentAction: 'Ready for instructions',
+        metrics: { actionsToday: 0, responseTime: '0.8s' },
+        connectedTools: ['gmail', 'google_calendar', 'google_maps', 'whatsapp'],
+        samplePrompts: [
+          `Add a new lead to our CRM database`,
+          `Draft a follow-up email for our top buyer lead`,
+          `Search nearby comps and schools on Google Maps`,
+        ],
+        systemPrompt:
+          newBotPrompt.trim() ||
+          `You are ${newBotName.trim()}, ${newBotRole.trim()} at Atelier Estate. Help manage leads, properties, emails, and calls.`,
+      };
+      setEmployees((prev) => [...prev, newEmp]);
+      setChatHistories((prev) => ({
+        ...prev,
+        [id]: [
+          {
+            id: `welcome-${id}`,
+            sender: 'employee',
+            text: `Hello! I'm ${newEmp.name}, your new ${newEmp.role}. How can I help your brokerage today?`,
+            timestamp: 'Just now',
+          },
+        ],
+      }));
+      setSelectedEmployeeId(id);
+    }
+
+    setEditingBotId(null);
     setNewBotName('');
     setNewBotRole('');
     setNewBotSpecialty('');
@@ -2598,34 +2919,61 @@ export function App() {
       );
     }
 
-    let token = googleToken;
-    if (!token) {
-      const auth = await connectGoogleWorkspace();
-      setGoogleEmail(auth.userEmail);
-      setGoogleToken(auth.accessToken);
-      token = auth.accessToken;
-    }
-
     const endIso = new Date(
       new Date(startIso).getTime() + (durationMinutes || 45) * 60000
     ).toISOString();
-
-    const created = await createCalendarShowingEvent({
-      accessToken: token!,
-      summary: meetingTitle,
-      description: notes,
-      startIso,
-      endIso,
-      attendeeEmails: [agent.email, leadEmail],
-      calendarId: agent.calendarId || 'primary',
-    });
 
     const matchedLead = leads.find(
       (l) => l.email.toLowerCase() === leadEmail.toLowerCase()
     );
 
+    // Owner-Driven .ics Calendar Invite Dispatch via Backend (No Employee OAuth Required!)
+    const serverBookResp = await fetch('/api/calendar/book-agent-meeting', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: meetingTitle,
+        description: notes,
+        propertyTitle,
+        startIso,
+        endIso,
+        durationMinutes: durationMinutes || 45,
+        agentId: agent.id,
+        agentName: agent.name,
+        agentEmail: agent.email,
+        agentPhone: agent.phone,
+        leadId: matchedLead?.id,
+        leadName,
+        leadEmail,
+      }),
+    });
+    const serverBookData = await serverBookResp.json();
+    if (!serverBookResp.ok || !serverBookData.ok) {
+      throw new Error(
+        serverBookData.error || 'Could not book meeting on master schedule.'
+      );
+    }
+
+    let finalLink = serverBookData.htmlLink;
+    if (googleToken) {
+      try {
+        const created = await createCalendarShowingEvent({
+          accessToken: googleToken,
+          summary: meetingTitle,
+          description: notes,
+          startIso,
+          endIso,
+          attendeeEmails: [agent.email, leadEmail],
+          calendarId: 'primary',
+        });
+        if (created.htmlLink) finalLink = created.htmlLink;
+      } catch {
+        // Keep server .ics invite link
+      }
+    }
+
     const newMeetingRecord: ScheduledMeetingRecord = {
-      id: `mtg-${Date.now()}`,
+      id: serverBookData.meeting?.id || `mtg-${Date.now()}`,
       title: meetingTitle,
       startIso,
       endIso,
@@ -2633,13 +2981,13 @@ export function App() {
       agentId: agent.id,
       agentName: agent.name,
       agentEmail: agent.email,
-      calendarId: agent.calendarId || agent.email,
+      calendarId: agent.email,
       leadId: matchedLead?.id,
       leadName,
       leadEmail,
       propertyTitle,
-      source: 'Google Calendar',
-      htmlLink: created.htmlLink,
+      source: serverBookData.meeting?.source || 'Master Schedule (.ics Invite)',
+      htmlLink: finalLink,
     };
     setScheduledMeetings((prev) => [newMeetingRecord, ...prev]);
 
@@ -2663,7 +3011,7 @@ export function App() {
           ? {
               ...a,
               calendarConnected: true,
-              lastContactedByAi: `Meeting booked for ${leadName}`,
+              lastContactedByAi: `Showing assigned for ${leadName}`,
             }
           : a
       )
@@ -2673,9 +3021,9 @@ export function App() {
       employeeId: 'maya',
       category: 'CALENDAR_SYNC',
       status: 'SUCCESS',
-      title: `Updated ${agent.name}’s Calendar: ${meetingTitle}`,
-      detail: `Conflict validation passed. Synced directly to Google Calendar (${agent.calendarId || agent.email}) with attendee ${leadEmail}. Event Link: ${created.htmlLink}`,
-      channelOrTool: 'Google Calendar',
+      title: `Assigned Showing to ${agent.name}: ${meetingTitle}`,
+      detail: `${serverBookData.dispatchedSummary}. Calendar Link: ${finalLink}`,
+      channelOrTool: 'Calendar Invite (.ics)',
     });
   };
 
@@ -2885,6 +3233,9 @@ export function App() {
     setLicenseSession(session);
     localStorage.setItem('atelier_license_session_v1', JSON.stringify(session));
     setShowPublicLandingPage(false);
+    if (session.role === 'ADMIN') {
+      setActiveTab('b2b_portal');
+    }
   };
 
   const handleLockSystemNow = () => {
@@ -2895,68 +3246,36 @@ export function App() {
 
   if (showPublicLandingPage || !licenseSession) {
     return (
-      <div className="relative min-h-screen bg-[#07090E]">
-        {/* Persistent Top Mode Switcher Bar for Owner */}
-        <div className="bg-amber-500 text-slate-950 px-4 py-2 flex flex-wrap items-center justify-between gap-3 text-xs font-bold border-b border-amber-600 z-50">
-          <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 rounded bg-slate-950 text-amber-400 font-mono text-[10px]">
-              LIVE PREVIEW
-            </span>
-            <span>
-              You are viewing your Public High-Converting Landing Page (Locked
-              for unpaid visitors)
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                const adminSess: ActiveLicenseSession = licenseSession || {
-                  role: 'ADMIN',
-                  agencyName: 'Atelier Estate AI (Master Admin)',
-                  clientName: 'System Owner',
-                  clientEmail: 'khushi4762@gmail.com',
-                  licenseKey: 'ADMIN-ESTATE-2026',
-                  planTier: 'Enterprise',
-                };
-                setLicenseSession(adminSess);
-                localStorage.setItem(
-                  'atelier_license_session_v1',
-                  JSON.stringify(adminSess)
-                );
-                setActiveTab('b2b_portal');
-                setShowPublicLandingPage(false);
-              }}
-              className="px-3 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 text-amber-300 text-xs font-bold transition cursor-pointer"
-            >
-              🔑 Open License Generator & Enquiries Hub →
-            </button>
-            <button
-              onClick={() => {
-                const adminSess: ActiveLicenseSession = licenseSession || {
-                  role: 'ADMIN',
-                  agencyName: 'Atelier Estate AI (Master Admin)',
-                  clientName: 'System Owner',
-                  clientEmail: 'khushi4762@gmail.com',
-                  licenseKey: 'ADMIN-ESTATE-2026',
-                  planTier: 'Enterprise',
-                };
-                setLicenseSession(adminSess);
-                localStorage.setItem(
-                  'atelier_license_session_v1',
-                  JSON.stringify(adminSess)
-                );
-                setActiveTab('chat');
-                setShowPublicLandingPage(false);
-              }}
-              className="px-3 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-950 text-xs font-bold transition cursor-pointer shadow-xs"
-            >
-              🤖 Open AI Automation Dashboard →
-            </button>
-          </div>
-        </div>
-
-        <LandingPageView onUnlockSuccess={handleUnlockSuccess} />
-      </div>
+      <LandingPageView
+        onUnlockSuccess={handleUnlockSuccess}
+        onEnquirySubmitted={(syncedLead) => {
+          if (syncedLead && syncedLead.id) {
+            setLeads((prev) =>
+              prev.some((l) => l.id === syncedLead.id)
+                ? prev
+                : [
+                    {
+                      id: syncedLead.id,
+                      name: syncedLead.name,
+                      email: syncedLead.email,
+                      phone: syncedLead.phone,
+                      source: syncedLead.source || 'Landing Page Enquiry',
+                      budget: syncedLead.budget || 'B2B Agency',
+                      timeline: syncedLead.timeline || 'Immediate',
+                      propertyInterest:
+                        syncedLead.propertyInterest || 'Agency Automation',
+                      qualificationScore: syncedLead.qualificationScore || 95,
+                      status: 'Unqualified',
+                      assignedEmployeeId: 'elena',
+                      lastContacted: 'Submitted on Landing Page just now',
+                      notes: syncedLead.notes || 'Landing Page Enquiry',
+                    },
+                    ...prev,
+                  ]
+            );
+          }
+        }}
+      />
     );
   }
 
@@ -2965,57 +3284,41 @@ export function App() {
       {/* ====================================================================
           LEFT SIDEBAR: BOTS AT LEFT + CONNECTED APPS & GMAIL AT BOTTOM-LEFT
           ==================================================================== */}
-      <aside className="w-76 bg-slate-950 text-slate-100 border-r border-slate-800 flex flex-col justify-between shrink-0 select-none">
-        {/* Top Brand + New Bot Button */}
-        <div className="p-4 border-b border-slate-800/80 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-xs shadow-xs">
+      <aside className="w-72 bg-slate-950 text-slate-100 border-r border-slate-800 flex flex-col justify-between shrink-0 select-none">
+        {/* Top Brand + Sign Out */}
+        <div className="px-4 py-3.5 border-b border-slate-800/80 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-xs shadow-xs shrink-0">
               AE
             </div>
-            <div>
-              <div className="text-sm font-bold text-white leading-tight">
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-white leading-tight truncate">
                 Atelier Estate
               </div>
-              <div className="text-[11px] text-slate-400">
-                AI Employees & Brokerage OS
+              <div className="text-[11px] text-slate-400 truncate">
+                {licenseSession.agencyName}
               </div>
             </div>
           </div>
 
           <button
-            onClick={() => setNewBotModalOpen(true)}
-            title="Create Custom AI Employee"
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium border border-slate-700 transition-colors"
+            onClick={handleLockSystemNow}
+            title="Sign Out & Lock Dashboard"
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/70 text-slate-300 hover:text-rose-300 border border-slate-800 text-[11px] font-medium transition-colors cursor-pointer shrink-0"
           >
-            <Plus className="w-3.5 h-3.5" /> New Bot
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign Out</span>
           </button>
         </div>
 
-        {/* Prominent 1-Click Public Landing Page & License Hub Buttons + BYOK Card */}
-        <div className="px-3 pt-3 space-y-2">
-          <div className="grid grid-cols-2 gap-1.5">
-            <button
-              onClick={() => setShowPublicLandingPage(true)}
-              className="px-2.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs"
-            >
-              <Globe className="w-3.5 h-3.5 shrink-0" />
-              <span>Landing Page</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('b2b_portal')}
-              className="px-2.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/40 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
-            >
-              <KeyRound className="w-3.5 h-3.5 shrink-0" />
-              <span>License Lock</span>
-            </button>
-          </div>
-
+        {/* Clean 1-Click BYOK LLM API Key Card */}
+        <div className="px-3 pt-3">
           <button
             onClick={() => {
               setOnboardingChannel('llm_engine');
               setOnboardingModalOpen(true);
             }}
-            className="w-full p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800/90 border border-slate-800 flex items-center justify-between text-left transition-all group"
+            className="w-full p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800/90 border border-slate-800 flex items-center justify-between text-left transition-all group cursor-pointer"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
@@ -3036,17 +3339,25 @@ export function App() {
               </div>
             </div>
             <span className="px-2 py-1 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-semibold shrink-0 group-hover:bg-amber-500 group-hover:text-slate-950 transition-colors">
-              {hasCustomLlmKey ? 'Change Key' : 'Paste Key'}
+              {hasCustomLlmKey ? 'Change' : 'Paste Key'}
             </span>
           </button>
         </div>
 
-        {/* AI Employees List (Middle Scrollable) */}
+        {/* AI Employees List (Middle Scrollable — Full Add, Edit & Delete!) */}
         <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
           <div>
-            <div className="px-2 pb-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              <span>AI Employees ({employees.length})</span>
-              <span className="text-emerald-400">● Online</span>
+            <div className="px-2 pb-2 flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                AI Employees ({employees.length})
+              </span>
+              <button
+                onClick={openCreateBotModal}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[10px] font-semibold transition-colors cursor-pointer"
+              >
+                <Plus className="w-3 h-3" />
+                <span>Add Bot</span>
+              </button>
             </div>
             <div className="space-y-1">
               {employees.map((emp) => {
@@ -3054,41 +3365,84 @@ export function App() {
                 const badgeClass =
                   AVATAR_BADGE_COLORS[emp.id] || 'bg-slate-700 text-white';
                 return (
-                  <button
+                  <div
                     key={emp.id}
-                    onClick={() => {
-                      setSelectedEmployeeId(emp.id);
-                      setActiveTab('chat');
-                    }}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-all ${
+                    className={`group flex items-center justify-between gap-1 px-2.5 py-2 rounded-xl transition-all ${
                       isSelected
                         ? 'bg-white text-slate-950 shadow-sm'
                         : 'text-slate-300 hover:bg-slate-900 hover:text-white'
                     }`}
                   >
-                    <div
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 ${
-                        isSelected
-                          ? 'bg-slate-950 text-white'
-                          : badgeClass
-                      }`}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedEmployeeId(emp.id);
+                        setActiveTab('chat');
+                      }}
+                      className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
                     >
-                      {emp.avatarInitials}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-bold truncate flex items-center justify-between gap-1.5">
-                        <span className="truncate">{emp.name}</span>
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-                      </div>
                       <div
-                        className={`text-[11px] truncate ${
-                          isSelected ? 'text-slate-600 font-medium' : 'text-slate-400'
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${
+                          isSelected
+                            ? 'bg-slate-950 text-white'
+                            : badgeClass
                         }`}
                       >
-                        {emp.role}
+                        {emp.avatarInitials}
                       </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-bold truncate flex items-center gap-1.5">
+                          <span className="truncate">{emp.name}</span>
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                        </div>
+                        <div
+                          className={`text-[11px] truncate ${
+                            isSelected
+                              ? 'text-slate-600 font-medium'
+                              : 'text-slate-400'
+                          }`}
+                        >
+                          {emp.role}
+                        </div>
+                      </div>
+                    </button>
+
+                    {/* Edit & Delete AI Employee Buttons */}
+                    <div className="flex items-center gap-0.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditBotModal(emp);
+                        }}
+                        title={`Edit ${emp.name} (Rename / Role / Instructions)`}
+                        className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                          isSelected
+                            ? 'text-slate-600 hover:text-slate-950 hover:bg-slate-200/70'
+                            : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                        }`}
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                      {employees.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteBot(emp.id);
+                          }}
+                          title={`Delete ${emp.name}`}
+                          className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                            isSelected
+                              ? 'text-slate-500 hover:text-rose-600 hover:bg-rose-50'
+                              : 'text-slate-500 hover:text-rose-400 hover:bg-slate-800'
+                          }`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -3100,19 +3454,22 @@ export function App() {
               <span>Human Agents ({humanAgents.length})</span>
               <button
                 onClick={() => setActiveTab('human_agents')}
-                className="text-amber-400 hover:underline font-semibold"
+                className="text-amber-400 hover:underline font-semibold cursor-pointer"
               >
-                Manage + Cal
+                Add / Edit
               </button>
             </div>
             <div className="space-y-1">
-              {humanAgents.slice(0, 3).map((ha) => (
-                <button
+              {humanAgents.slice(0, 4).map((ha) => (
+                <div
                   key={ha.id}
-                  onClick={() => setActiveTab('human_agents')}
-                  className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl bg-slate-900/60 hover:bg-slate-900 text-left border border-slate-800/70 transition-colors"
+                  className="flex items-center justify-between px-2.5 py-2 rounded-xl bg-slate-900/60 hover:bg-slate-900 border border-slate-800/70 transition-colors"
                 >
-                  <div className="flex items-center gap-2.5 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('human_agents')}
+                    className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+                  >
                     <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-300 flex items-center justify-center text-[11px] font-bold shrink-0">
                       {ha.avatarInitials}
                     </div>
@@ -3124,17 +3481,26 @@ export function App() {
                         {ha.email}
                       </div>
                     </div>
+                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('human_agents')}
+                      title={`Edit ${ha.name}`}
+                      className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteHumanAgent(ha.id)}
+                      title={`Delete ${ha.name}`}
+                      className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-slate-800 cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
                   </div>
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-semibold shrink-0 ${
-                      ha.calendarConnected || googleEmail
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : 'bg-slate-800 text-slate-400'
-                    }`}
-                  >
-                    {ha.calendarConnected || googleEmail ? 'Cal Sync' : 'Cal'}
-                  </span>
-                </button>
+                </div>
               ))}
             </div>
           </div>
@@ -3148,7 +3514,7 @@ export function App() {
           <div className="relative">
             <button
               onClick={() => setAppsDropdownOpen((prev) => !prev)}
-              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-medium text-slate-100 transition-all"
+              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-medium text-slate-100 transition-all cursor-pointer"
             >
               <span className="flex items-center gap-2">
                 <Settings className="w-3.5 h-3.5 text-amber-400" />
@@ -3169,18 +3535,30 @@ export function App() {
               <div className="absolute bottom-full left-0 right-0 mb-2 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-2 z-30 space-y-1 max-h-96 overflow-y-auto">
                 <div className="px-2.5 py-1.5 flex items-center justify-between border-b border-slate-800">
                   <span className="text-[11px] font-semibold text-slate-300">
-                    Multi-Account & Website Apps
+                    Apps & Webhook Diagnostics
                   </span>
-                  <button
-                    onClick={() => {
-                      setOnboardingChannel('llm_engine');
-                      setAppsDropdownOpen(false);
-                      setOnboardingModalOpen(true);
-                    }}
-                    className="text-[11px] text-amber-400 font-semibold hover:underline"
-                  >
-                    + LLM Key
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setOnboardingChannel('webhook_health');
+                        setAppsDropdownOpen(false);
+                        setOnboardingModalOpen(true);
+                      }}
+                      className="text-[11px] text-emerald-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      Webhook Health
+                    </button>
+                    <button
+                      onClick={() => {
+                        setOnboardingChannel('llm_engine');
+                        setAppsDropdownOpen(false);
+                        setOnboardingModalOpen(true);
+                      }}
+                      className="text-[11px] text-amber-400 font-semibold hover:underline cursor-pointer"
+                    >
+                      + LLM Key
+                    </button>
+                  </div>
                 </div>
 
                 {tools.map((tool) => {
@@ -3226,7 +3604,7 @@ export function App() {
             )}
           </div>
 
-          {/* Gmail / Google Account Box (Bottom-Left Corner) */}
+          {/* Email / Google Account Box (Bottom-Left Corner) */}
           <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <div
@@ -3240,12 +3618,12 @@ export function App() {
               </div>
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-white truncate">
-                  {googleEmail ? googleEmail : 'No Gmail Connected'}
+                  {googleEmail ? googleEmail : 'No Email Connected'}
                 </div>
                 <div className="text-[10px] text-slate-400 truncate">
                   {googleEmail
-                    ? 'Gmail & Calendar Synced'
-                    : 'Login with any Google account'}
+                    ? 'Email & .ics Dispatch Ready'
+                    : 'Resend / Brevo / Gmail'}
                 </div>
               </div>
             </div>
@@ -3257,15 +3635,15 @@ export function App() {
                     setOnboardingChannel('gmail');
                     setOnboardingModalOpen(true);
                   }}
-                  title="Switch Google Account"
-                  className="px-2 py-1 rounded text-[10px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-200"
+                  title="Switch Email Provider"
+                  className="px-2 py-1 rounded text-[10px] font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 cursor-pointer"
                 >
                   Switch
                 </button>
                 <button
                   onClick={handleDisconnectGoogle}
-                  title="Disconnect Google Account"
-                  className="p-1 rounded text-slate-400 hover:text-rose-400"
+                  title="Disconnect Email Account"
+                  className="p-1 rounded text-slate-400 hover:text-rose-400 cursor-pointer"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                 </button>
@@ -3276,9 +3654,9 @@ export function App() {
                   setOnboardingChannel('gmail');
                   setOnboardingModalOpen(true);
                 }}
-                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold shrink-0 transition-colors"
+                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold shrink-0 transition-colors cursor-pointer"
               >
-                Sign In
+                Connect
               </button>
             )}
           </div>
@@ -3286,192 +3664,221 @@ export function App() {
       </aside>
 
       {/* ====================================================================
-          CENTER WORKSPACE: TOP BAR + CHAT / LIVE VOICE / DATABASES
+          CENTER WORKSPACE: TWO-ROW NON-OVERLAPPING TOP HEADER + VIEWS
           ==================================================================== */}
       <main className="flex-1 flex flex-col min-w-0 bg-white">
-        {/* Global Top Bar: Active Bot + Database Tabs + Live Call & BYOK Buttons */}
-        <header className="px-6 py-3.5 border-b border-slate-200 flex items-center justify-between gap-4 bg-white shrink-0">
-          {/* Left: Active AI Employee Identity */}
-          <div className="flex items-center gap-3 min-w-0">
-            <div
-              className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 ${
-                AVATAR_BADGE_COLORS[activeEmployee.id] ||
-                'bg-slate-900 text-white'
-              }`}
-            >
-              {activeEmployee.avatarInitials}
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h1 className="text-sm font-bold text-slate-900 truncate">
-                  {activeEmployee.name}
-                </h1>
-                <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold">
-                  {activeEmployee.role}
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 truncate">
-                {activeEmployee.specialty}
-              </p>
-            </div>
-          </div>
-
-          {/* Center: Clean Segmented Switcher (Chat vs Properties DB vs Leads DB vs Human Agents vs Performance) */}
-          <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 shrink-0">
-            <button
-              onClick={() => setActiveTab('chat')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                activeTab === 'chat'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-              Chat & Calls
-            </button>
-            <button
-              onClick={() => setActiveTab('properties')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                activeTab === 'properties'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Building2 className="w-3.5 h-3.5" />
-              Properties ({properties.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('leads')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                activeTab === 'leads'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Users className="w-3.5 h-3.5" />
-              Leads DB ({leads.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('human_agents')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                activeTab === 'human_agents'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <UserCheck className="w-3.5 h-3.5" />
-              Human Agents ({humanAgents.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('performance')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                activeTab === 'performance'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <BarChart3 className="w-3.5 h-3.5" />
-              Performance
-            </button>
-            <button
-              onClick={() => setActiveTab('b2b_portal')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                activeTab === 'b2b_portal'
-                  ? 'bg-amber-500 text-slate-950 shadow-2xs'
-                  : 'text-amber-700 hover:text-slate-900 bg-amber-500/10'
-              }`}
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              License & Website
-            </button>
-          </div>
-
-          {/* Right: Live Voice Call + Bot Logs Dropdown + Side Panel Toggle + BYOK API Key Button */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => setShowPublicLandingPage(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-300 text-xs font-semibold border border-slate-700 transition-all cursor-pointer"
-              title="Preview Public High-Converting Landing Page & Enquiry Form"
-            >
-              <Globe className="w-3.5 h-3.5 text-amber-400" />
-              <span className="hidden xl:inline">Landing Page</span>
-            </button>
-            {!isCallActive ? (
-              <button
-                onClick={startLiveVoiceCall}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-2xs transition-all"
-              >
-                <PhoneCall className="w-3.5 h-3.5" />
-                Live Call
-              </button>
-            ) : (
-              <button
-                onClick={endLiveVoiceCall}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-2xs transition-all"
-              >
-                <PhoneOff className="w-3.5 h-3.5" />
-                End Call
-              </button>
-            )}
-
-            {/* Bot Activity Logs Dropdown + Side Screen Switcher */}
-            <div className="relative flex items-center">
-              <button
-                onClick={() => setLogsDropdownOpen((prev) => !prev)}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-l-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold border-r border-slate-700 transition-colors"
-                title="Open Bot Activity Logs in Dropdown View"
-              >
-                <Terminal className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Bot Logs</span>
-                <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono">
-                  {botLogs.length}
-                </span>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-              </button>
-              <button
-                onClick={() => setLogsSidePanelOpen((prev) => !prev)}
-                className={`inline-flex items-center px-2.5 py-2 rounded-r-xl text-xs font-semibold transition-colors ${
-                  logsSidePanelOpen
-                    ? 'bg-amber-500 text-slate-950'
-                    : 'bg-slate-900 hover:bg-slate-800 text-slate-300'
+        {/* Global Two-Row Top Header — Zero Overlapping Buttons */}
+        <header className="border-b border-slate-200 bg-white shrink-0">
+          {/* Row 1: Active AI Employee Identity (with Edit & Delete Bot) + Live Call / Bot Logs / BYOK */}
+          <div className="px-6 py-3 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100">
+            <div className="flex items-center gap-3 min-w-0">
+              <div
+                className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 ${
+                  AVATAR_BADGE_COLORS[activeEmployee.id] ||
+                  'bg-slate-900 text-white'
                 }`}
-                title={
-                  logsSidePanelOpen
-                    ? 'Hide Side Bot Logs Screen'
-                    : 'Show Side Bot Logs Screen'
-                }
               >
-                {logsSidePanelOpen ? (
-                  <PanelRightClose className="w-3.5 h-3.5" />
-                ) : (
-                  <PanelRightOpen className="w-3.5 h-3.5" />
-                )}
-              </button>
+                {activeEmployee.avatarInitials}
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-sm font-bold text-slate-900 truncate">
+                    {activeEmployee.name}
+                  </h1>
+                  <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold">
+                    {activeEmployee.role}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => openEditBotModal(activeEmployee)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 hover:border-slate-300 bg-white text-slate-700 hover:text-slate-900 text-[11px] font-medium transition-colors cursor-pointer"
+                    title="Rename or Edit this AI Employee"
+                  >
+                    <Edit3 className="w-3 h-3" />
+                    <span>Edit Bot</span>
+                  </button>
+                  {employees.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteBot(activeEmployee.id)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-rose-200 hover:bg-rose-50 text-rose-600 text-[11px] font-medium transition-colors cursor-pointer"
+                      title="Delete this AI Employee"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Delete</span>
+                    </button>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 truncate mt-0.5">
+                  {activeEmployee.specialty}
+                </p>
+              </div>
+            </div>
 
-              {logsDropdownOpen && (
-                <BotLogsDropdownPopover
-                  logs={botLogs}
-                  employees={employees}
-                  sidePanelOpen={logsSidePanelOpen}
-                  onToggleSidePanel={() =>
-                    setLogsSidePanelOpen((prev) => !prev)
+            {/* Right Actions: Live Call + Bot Logs + BYOK Keys */}
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {!isCallActive ? (
+                <button
+                  onClick={startLiveVoiceCall}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-2xs transition-all cursor-pointer"
+                >
+                  <PhoneCall className="w-3.5 h-3.5" />
+                  <span>Live Call</span>
+                </button>
+              ) : (
+                <button
+                  onClick={endLiveVoiceCall}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-2xs transition-all cursor-pointer"
+                >
+                  <PhoneOff className="w-3.5 h-3.5" />
+                  <span>End Call</span>
+                </button>
+              )}
+
+              {/* Bot Activity Logs Dropdown + Side Screen Switcher */}
+              <div className="relative flex items-center">
+                <button
+                  onClick={() => setLogsDropdownOpen((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-l-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold border-r border-slate-700 transition-colors cursor-pointer"
+                  title="Open Bot Activity Logs"
+                >
+                  <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Bot Logs</span>
+                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-mono">
+                    {botLogs.length}
+                  </span>
+                  <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                </button>
+                <button
+                  onClick={() => setLogsSidePanelOpen((prev) => !prev)}
+                  className={`inline-flex items-center px-2.5 py-1.5 rounded-r-xl text-xs font-semibold transition-colors cursor-pointer ${
+                    logsSidePanelOpen
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300'
+                  }`}
+                  title={
+                    logsSidePanelOpen
+                      ? 'Hide Side Bot Logs Panel'
+                      : 'Dock Bot Logs to Right Side'
                   }
-                  onClearLogs={() => setBotLogs([])}
-                  onCloseDropdown={() => setLogsDropdownOpen(false)}
-                />
+                >
+                  {logsSidePanelOpen ? (
+                    <PanelRightClose className="w-3.5 h-3.5" />
+                  ) : (
+                    <PanelRightOpen className="w-3.5 h-3.5" />
+                  )}
+                </button>
+
+                {logsDropdownOpen && (
+                  <BotLogsDropdownPopover
+                    logs={botLogs}
+                    employees={employees}
+                    sidePanelOpen={logsSidePanelOpen}
+                    onToggleSidePanel={() =>
+                      setLogsSidePanelOpen((prev) => !prev)
+                    }
+                    onClearLogs={() => setBotLogs([])}
+                    onCloseDropdown={() => setLogsDropdownOpen(false)}
+                  />
+                )}
+              </div>
+
+              <button
+                onClick={() => {
+                  setOnboardingChannel('llm_engine');
+                  setOnboardingModalOpen(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+                <span>BYOK Keys</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Row 2: Workspace Navigation Bar — Clean, Wrapping, Never Overlaps */}
+          <div className="px-6 py-2 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                onClick={() => setActiveTab('chat')}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  activeTab === 'chat'
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200/80 hover:text-slate-900'
+                }`}
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>Chat & Calls</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('properties')}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  activeTab === 'properties'
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200/80 hover:text-slate-900'
+                }`}
+              >
+                <Building2 className="w-3.5 h-3.5" />
+                <span>Properties ({properties.length})</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('leads')}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  activeTab === 'leads'
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200/80 hover:text-slate-900'
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Leads & Inbounds ({leads.length})</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('human_agents')}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  activeTab === 'human_agents'
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200/80 hover:text-slate-900'
+                }`}
+              >
+                <UserCheck className="w-3.5 h-3.5" />
+                <span>Human Agents ({humanAgents.length})</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('performance')}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  activeTab === 'performance'
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'bg-white text-slate-600 border border-slate-200/80 hover:text-slate-900'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                <span>Performance</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('setup_guide')}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  activeTab === 'setup_guide'
+                    ? 'bg-indigo-950 text-white shadow-2xs border border-indigo-700'
+                    : 'bg-indigo-50 text-indigo-950 border border-indigo-200 hover:bg-indigo-100'
+                }`}
+              >
+                <BookOpen className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Step-by-Step Setup & Templates (Make / n8n / API)</span>
+              </button>
+              {licenseSession.role === 'ADMIN' && (
+                <button
+                  onClick={() => setActiveTab('b2b_portal')}
+                  className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                    activeTab === 'b2b_portal'
+                      ? 'bg-amber-500 text-slate-950 shadow-2xs'
+                      : 'bg-amber-50 text-amber-900 border border-amber-300 hover:bg-amber-100'
+                  }`}
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Admin: License Keys & Website Enquiries</span>
+                </button>
               )}
             </div>
-
-            <button
-              onClick={() => {
-                setOnboardingChannel('llm_engine');
-                setOnboardingModalOpen(true);
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
-            >
-              <KeyRound className="w-3.5 h-3.5 text-amber-400" />
-              <span>BYOK Keys</span>
-            </button>
           </div>
         </header>
 
@@ -3714,20 +4121,39 @@ export function App() {
                               </div>
                             )}
 
-                            {!msg.proposedAction.executed && (
-                              <button
-                                onClick={() =>
-                                  handleExecuteProposedAction(
-                                    msg.id,
-                                    msg.proposedAction!
-                                  )
-                                }
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
-                              >
-                                <Check className="w-3.5 h-3.5" />
-                                Approve & Run Action
-                              </button>
-                            )}
+                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                              {msg.proposedAction.directLaunchUrl && (
+                                <a
+                                  href={msg.proposedAction.directLaunchUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors shadow-2xs"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                  <span>
+                                    1-Click Open & Send in{' '}
+                                    {msg.proposedAction.targetChannel
+                                      ? msg.proposedAction.targetChannel.toUpperCase()
+                                      : 'App'}
+                                  </span>
+                                </a>
+                              )}
+
+                              {!msg.proposedAction.executed && (
+                                <button
+                                  onClick={() =>
+                                    handleExecuteProposedAction(
+                                      msg.id,
+                                      msg.proposedAction!
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  Approve & Run Action
+                                </button>
+                              )}
+                            </div>
                           </div>
                         )}
 
@@ -4158,6 +4584,7 @@ export function App() {
                   </div>
                 </div>
 
+                <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-500">
@@ -4468,6 +4895,7 @@ export function App() {
                     )}
                   </tbody>
                 </table>
+                </div>
               </div>
             </div>
           </div>
@@ -4505,9 +4933,229 @@ export function App() {
         )}
 
         {/* ====================================================================
+            VIEW 5B: FULL DETAILED STEP-BY-STEP SETUP & AUTOMATION TEMPLATES PAGE
+            ==================================================================== */}
+        {activeTab === 'setup_guide' && (
+          <div className="flex-1 overflow-y-auto p-6 bg-slate-50">
+            <div className="max-w-5xl mx-auto space-y-6">
+              {/* MASTER 4-STAGE ARCHITECTURE HEADER */}
+              <div className="p-6 rounded-3xl bg-slate-900 text-white border border-slate-800 shadow-lg space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-bold">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      100% Automated AI Setup · Pre-Built Make.com & n8n Blueprints
+                    </span>
+                    <h2 className="text-xl font-bold text-white">
+                      Complete Step-by-Step Connection & Automation Blueprint Center
+                    </h2>
+                    <p className="text-xs text-slate-300 max-w-3xl leading-relaxed">
+                      Connect every channel in your brokerage step-by-step. You don’t have to build automations from scratch—download our ready-made <strong>Make.com</strong> or <strong>n8n</strong> blueprint files (<code className="bg-slate-800 px-1.5 py-0.5 rounded font-mono">.json</code>) with your live CRM URL already pre-configured inside, or follow the exact Official API walkthrough.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOnboardingChannel('llm_engine');
+                      setOnboardingModalOpen(true);
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors cursor-pointer shrink-0"
+                  >
+                    Open Connected Apps Vault
+                  </button>
+                </div>
+
+                {/* 4-STAGE QUICK CHECKLIST */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
+                  <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+                        Stage 1 · AI Brain
+                      </span>
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          llmSettings.apiKey ? 'bg-emerald-400' : 'bg-amber-400'
+                        }`}
+                      />
+                    </div>
+                    <div className="text-xs font-bold text-white">
+                      1. Connect Your LLM API Key
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-snug">
+                      Paste your Groq, OpenAI, Claude, Gemini, or DeepSeek key so all 6 AI Employees think and respond live.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOnboardingChannel('llm_engine');
+                        setOnboardingModalOpen(true);
+                      }}
+                      className="text-[11px] font-bold text-amber-300 hover:text-amber-200 underline cursor-pointer pt-1"
+                    >
+                      Configure LLM Key →
+                    </button>
+                  </div>
+
+                  <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                        Stage 2 · Email & Tours
+                      </span>
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          tools.find((t) => t.id === 'gmail')?.connected
+                            ? 'bg-emerald-400'
+                            : 'bg-slate-500'
+                        }`}
+                      />
+                    </div>
+                    <div className="text-xs font-bold text-white">
+                      2. Connect Email & Calendar
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-snug">
+                      Use a free Resend/Brevo key, Gmail 16-char App Password, or Google OAuth to dispatch real emails & .ics tour invites.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOnboardingChannel('gmail');
+                        setOnboardingModalOpen(true);
+                      }}
+                      className="text-[11px] font-bold text-emerald-300 hover:text-emerald-200 underline cursor-pointer pt-1"
+                    >
+                      Configure Email & Calendar →
+                    </button>
+                  </div>
+
+                  <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-400">
+                        Stage 3 · Omnichannel
+                      </span>
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          tools.some(
+                            (t) =>
+                              ['whatsapp', 'instagram', 'facebook', 'telnyx'].includes(
+                                t.id
+                              ) && t.connected
+                          )
+                            ? 'bg-emerald-400'
+                            : 'bg-slate-500'
+                        }`}
+                      />
+                    </div>
+                    <div className="text-xs font-bold text-white">
+                      3. Import Make / n8n Blueprints
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-snug">
+                      Download our pre-built Make.com or n8n JSON blueprints below to automate WhatsApp, Instagram, Facebook & SMS.
+                    </p>
+                    <span className="text-[11px] font-bold text-indigo-300 block pt-1">
+                      See Interactive Guide Below ↓
+                    </span>
+                  </div>
+
+                  <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-pink-400">
+                        Stage 4 · Website & Diagnostics
+                      </span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                    </div>
+                    <div className="text-xs font-bold text-white">
+                      4. Website Leads & Health Logs
+                    </div>
+                    <p className="text-[11px] text-slate-300 leading-snug">
+                      Embed our HTML snippet on your agency site and inspect real-time webhook payloads in Webhook Health.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOnboardingChannel('webhook_health');
+                        setOnboardingModalOpen(true);
+                      }}
+                      className="text-[11px] font-bold text-pink-300 hover:text-pink-200 underline cursor-pointer pt-1"
+                    >
+                      Open Webhook Health →
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* INTERACTIVE STEP-BY-STEP BLUEPRINT GENERATOR & INSTALLER */}
+              <AutomationBlueprintGuide
+                channelId="whatsapp"
+                accountHandle={guideHandle}
+                webhookUrl={guideWebhookUrl}
+                onChangeAccountHandle={setGuideHandle}
+                onChangeWebhookUrl={setGuideWebhookUrl}
+                onSaveWebhookConnection={async (targetChannelId) => {
+                  setGuideSaving(true);
+                  setGuideFeedback(null);
+                  try {
+                    const res = await handleSaveChannelConfig(
+                      targetChannelId || 'whatsapp',
+                      {
+                        accountHandle: guideHandle.trim(),
+                        webhookUrl: guideWebhookUrl.trim(),
+                        secrets: {},
+                      }
+                    );
+                    setGuideFeedback({
+                      type: 'success',
+                      text:
+                        res?.verificationMessage ||
+                        '✅ Verified Outbound Webhook live!',
+                    });
+                  } catch (err: any) {
+                    setGuideFeedback({
+                      type: 'error',
+                      text: err?.message || 'Webhook verification failed.',
+                    });
+                  } finally {
+                    setGuideSaving(false);
+                  }
+                }}
+                onOpenWebhookHealth={() => {
+                  setOnboardingChannel('webhook_health');
+                  setOnboardingModalOpen(true);
+                }}
+                onWebsiteLeadReceived={(wl) => {
+                  setLeads((prev) => {
+                    if (prev.some((l) => l.id === wl.id)) return prev;
+                    const mapped: ClientLead = {
+                      id: wl.id,
+                      name: wl.name,
+                      email: wl.email,
+                      phone: wl.phone,
+                      source: wl.source || 'WhatsApp Business',
+                      budget: wl.budget || '$4,500,000',
+                      timeline: wl.timeline || 'Immediate',
+                      propertyInterest:
+                        wl.propertyInterest || 'The Mercer Penthouse',
+                      qualificationScore: wl.qualificationScore || 94,
+                      status: 'AI Qualified',
+                      assignedEmployeeId: 'marcus',
+                      assignedHumanAgentId: 'agent-1',
+                      lastContacted: 'Just now (Automated Webhook)',
+                      notes: wl.notes || 'Inbound automated lead.',
+                    };
+                    return [mapped, ...prev];
+                  });
+                }}
+                saving={guideSaving}
+                feedback={guideFeedback}
+                fullPageMode={true}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ====================================================================
             VIEW 6: B2B SALES, CLIENT LICENSE LOCK & HOSTINGER WEBSITE HUB
             ==================================================================== */}
-        {activeTab === 'b2b_portal' && (
+        {activeTab === 'b2b_portal' && licenseSession.role === 'ADMIN' && (
           <div className="flex-1 overflow-y-auto p-6 bg-slate-950 text-slate-100">
             <AdminLicenseEnquiriesView
               onOpenLandingPreview={() => setShowPublicLandingPage(true)}
@@ -4959,19 +5607,24 @@ export function App() {
       )}
 
       {/* ====================================================================
-          MODAL 5: CREATE NEW AI EMPLOYEE (BOT)
+          MODAL 5: CREATE OR EDIT AI EMPLOYEE (BOT)
           ==================================================================== */}
       {newBotModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-md overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <Bot className="w-4 h-4" />
-                Create Custom AI Employee
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-900 text-white">
+              <h3 className="text-sm font-bold flex items-center gap-2">
+                <Bot className="w-4 h-4 text-amber-400" />
+                {editingBotId
+                  ? 'Edit AI Employee (Name, Role & Instructions)'
+                  : 'Create Custom AI Employee'}
               </h3>
               <button
-                onClick={() => setNewBotModalOpen(false)}
-                className="text-slate-400 hover:text-slate-700"
+                onClick={() => {
+                  setNewBotModalOpen(false);
+                  setEditingBotId(null);
+                }}
+                className="text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -4979,7 +5632,7 @@ export function App() {
             <form onSubmit={handleCreateBot} className="p-5 space-y-3 text-xs">
               <div>
                 <label className="block font-medium text-slate-700 mb-1">
-                  Bot Name
+                  AI Agent Name *
                 </label>
                 <input
                   type="text"
@@ -4992,7 +5645,7 @@ export function App() {
               </div>
               <div>
                 <label className="block font-medium text-slate-700 mb-1">
-                  Role Title
+                  Role / Title *
                 </label>
                 <input
                   type="text"
@@ -5023,24 +5676,44 @@ export function App() {
                   rows={3}
                   value={newBotPrompt}
                   onChange={(e) => setNewBotPrompt(e.target.value)}
-                  placeholder="Describe how this bot should talk and what tasks it handles..."
+                  placeholder="Describe how this AI agent should talk and what tasks it handles..."
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg"
                 />
               </div>
-              <div className="pt-3 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setNewBotModalOpen(false)}
-                  className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-lg bg-slate-900 text-white font-semibold"
-                >
-                  Create AI Employee
-                </button>
+              <div className="pt-3 flex items-center justify-between gap-2">
+                {editingBotId && employees.length > 1 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleDeleteBot(editingBotId);
+                      setNewBotModalOpen(false);
+                      setEditingBotId(null);
+                    }}
+                    className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold cursor-pointer"
+                  >
+                    Delete AI Agent
+                  </button>
+                ) : (
+                  <div />
+                )}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewBotModalOpen(false);
+                      setEditingBotId(null);
+                    }}
+                    className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-semibold cursor-pointer"
+                  >
+                    {editingBotId ? 'Save Changes' : 'Create AI Employee'}
+                  </button>
+                </div>
               </div>
             </form>
           </div>

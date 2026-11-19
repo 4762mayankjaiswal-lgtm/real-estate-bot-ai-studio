@@ -110,6 +110,159 @@ interface InboundWebsiteLeadRecord {
 
 const inboundWebsiteLeads: InboundWebsiteLeadRecord[] = [];
 
+interface WebhookDiagnosticLogEntry {
+  id: string;
+  timestampIso: string;
+  direction: 'INBOUND' | 'OUTBOUND' | 'VERIFY_PING';
+  channelId: string;
+  endpointPath: string;
+  httpStatus: number;
+  status: 'SUCCESS' | 'PAYLOAD_ERROR' | 'AUTH_ERROR' | 'NETWORK_ERROR';
+  summary: string;
+  errorReason?: string;
+  payloadPreview: string;
+  receivedKeys?: string[];
+  expectedKeys?: string[];
+}
+
+interface ChannelWebhookHealthStat {
+  channelId: string;
+  lastInboundAtIso: string | null;
+  lastOutboundAtIso: string | null;
+  lastErrorAtIso: string | null;
+  lastErrorDetail: string | null;
+  inboundCount: number;
+  outboundCount: number;
+  errorCount: number;
+}
+
+const WEBHOOK_TRACKED_CHANNELS = [
+  'website_leads',
+  'whatsapp',
+  'instagram',
+  'facebook',
+  'telnyx',
+] as const;
+
+const webhookHealthState: {
+  lastReceivedAtIso: string | null;
+  lastErrorAtIso: string | null;
+  totalInboundReceived: number;
+  totalInboundRejected: number;
+  totalOutboundDispatched: number;
+  totalOutboundFailed: number;
+  channelStats: Record<string, ChannelWebhookHealthStat>;
+  recentLogs: WebhookDiagnosticLogEntry[];
+} = {
+  lastReceivedAtIso: null,
+  lastErrorAtIso: null,
+  totalInboundReceived: 0,
+  totalInboundRejected: 0,
+  totalOutboundDispatched: 0,
+  totalOutboundFailed: 0,
+  channelStats: WEBHOOK_TRACKED_CHANNELS.reduce((acc, ch) => {
+    acc[ch] = {
+      channelId: ch,
+      lastInboundAtIso: null,
+      lastOutboundAtIso: null,
+      lastErrorAtIso: null,
+      lastErrorDetail: null,
+      inboundCount: 0,
+      outboundCount: 0,
+      errorCount: 0,
+    };
+    return acc;
+  }, {} as Record<string, ChannelWebhookHealthStat>),
+  recentLogs: [],
+};
+
+function recordWebhookDiagnosticEvent(params: {
+  direction: 'INBOUND' | 'OUTBOUND' | 'VERIFY_PING';
+  channelId: string;
+  endpointPath: string;
+  httpStatus: number;
+  status: 'SUCCESS' | 'PAYLOAD_ERROR' | 'AUTH_ERROR' | 'NETWORK_ERROR';
+  summary: string;
+  errorReason?: string;
+  rawPayload?: any;
+  receivedKeys?: string[];
+  expectedKeys?: string[];
+}) {
+  const nowIso = new Date().toISOString();
+  const chKey = WEBHOOK_TRACKED_CHANNELS.includes(params.channelId as any)
+    ? params.channelId
+    : 'website_leads';
+
+  if (!webhookHealthState.channelStats[chKey]) {
+    webhookHealthState.channelStats[chKey] = {
+      channelId: chKey,
+      lastInboundAtIso: null,
+      lastOutboundAtIso: null,
+      lastErrorAtIso: null,
+      lastErrorDetail: null,
+      inboundCount: 0,
+      outboundCount: 0,
+      errorCount: 0,
+    };
+  }
+
+  const chStat = webhookHealthState.channelStats[chKey];
+
+  if (params.direction === 'INBOUND') {
+    if (params.status === 'SUCCESS') {
+      webhookHealthState.lastReceivedAtIso = nowIso;
+      webhookHealthState.totalInboundReceived += 1;
+      chStat.lastInboundAtIso = nowIso;
+      chStat.inboundCount += 1;
+    } else {
+      webhookHealthState.lastErrorAtIso = nowIso;
+      webhookHealthState.totalInboundRejected += 1;
+      chStat.lastErrorAtIso = nowIso;
+      chStat.lastErrorDetail = params.errorReason || params.summary;
+      chStat.errorCount += 1;
+    }
+  } else {
+    if (params.status === 'SUCCESS') {
+      webhookHealthState.totalOutboundDispatched += 1;
+      chStat.lastOutboundAtIso = nowIso;
+      chStat.outboundCount += 1;
+    } else {
+      webhookHealthState.lastErrorAtIso = nowIso;
+      webhookHealthState.totalOutboundFailed += 1;
+      chStat.lastErrorAtIso = nowIso;
+      chStat.lastErrorDetail = params.errorReason || params.summary;
+      chStat.errorCount += 1;
+    }
+  }
+
+  let preview = '{}';
+  try {
+    preview = JSON.stringify(params.rawPayload ?? {}, null, 2).slice(0, 900);
+  } catch {
+    preview = String(params.rawPayload || '');
+  }
+
+  const entry: WebhookDiagnosticLogEntry = {
+    id: `whlog_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    timestampIso: nowIso,
+    direction: params.direction,
+    channelId: chKey,
+    endpointPath: params.endpointPath,
+    httpStatus: params.httpStatus,
+    status: params.status,
+    summary: params.summary,
+    errorReason: params.errorReason,
+    payloadPreview: preview,
+    receivedKeys: params.receivedKeys,
+    expectedKeys: params.expectedKeys,
+  };
+
+  webhookHealthState.recentLogs.unshift(entry);
+  if (webhookHealthState.recentLogs.length > 45) {
+    webhookHealthState.recentLogs.pop();
+  }
+}
+
 
 function loadVault(): StoredVault {
   try {
@@ -119,14 +272,49 @@ function loadVault(): StoredVault {
     if (fs.existsSync(VAULT_FILE)) {
       const raw = fs.readFileSync(VAULT_FILE, 'utf8');
       const parsed = JSON.parse(raw);
-      return {
+      const secrets = parsed.secrets || {};
+      delete secrets['EASY_BRIDGE_MODE'];
+
+      const rawConfigs = parsed.configs || {};
+      const cleanedConfigs: StoredVault['configs'] = {};
+      let purgedFake = false;
+
+      for (const [chId, cfg] of Object.entries<any>(rawConfigs)) {
+        if (!cfg) continue;
+        const detail = String(cfg.verifiedDetail || '');
+        const isFakeEasyBridge =
+          detail.includes('Easy Bridge Active') ||
+          detail.includes('Built-In AI Market');
+        const validAccounts = Array.isArray(cfg.accounts)
+          ? cfg.accounts.filter(
+              (a: any) =>
+                !String(a?.verifiedDetail || '').includes('Easy Bridge Active') &&
+                !String(a?.verifiedDetail || '').includes('Built-In AI Market')
+            )
+          : [];
+
+        if (isFakeEasyBridge && validAccounts.length === 0) {
+          purgedFake = true;
+          continue;
+        }
+        cleanedConfigs[chId] = {
+          ...cfg,
+          accounts: validAccounts,
+        };
+      }
+
+      const resultVault: StoredVault = {
         updatedAt: parsed.updatedAt || new Date().toISOString(),
         llmProvider: parsed.llmProvider || 'openai',
         llmModel: parsed.llmModel || 'gpt-4o-mini',
         llmBaseUrl: parsed.llmBaseUrl || '',
-        secrets: parsed.secrets || {},
-        configs: parsed.configs || {},
+        secrets,
+        configs: cleanedConfigs,
       };
+      if (purgedFake) {
+        saveVault(resultVault);
+      }
+      return resultVault;
     }
   } catch {
     // ignore read error
@@ -1151,15 +1339,11 @@ async function startServer() {
       let verifiedHandle = (accountHandle || '').trim();
       let verificationMessage = '';
 
+      const cleanWebhookUrl = (webhookUrl || '').trim();
+
       if (toolId === 'telnyx') {
         const apiKey = getCandidateSecret('TELNYX_API_KEY');
         const fromNum = getCandidateSecret('TELNYX_FROM_NUMBER');
-        if (!apiKey && !webhookUrl) {
-          return res.status(400).json({
-            ok: false,
-            error: 'Paste a valid Telnyx V2 API Key to verify connection.',
-          });
-        }
         if (apiKey) {
           const telnyxRes = await fetch('https://api.telnyx.com/v2/balance', {
             headers: { Authorization: `Bearer ${apiKey}` },
@@ -1168,28 +1352,36 @@ async function startServer() {
           if (!telnyxRes.ok) {
             return res.status(400).json({
               ok: false,
-              error: `Telnyx API rejected this key (HTTP ${telnyxRes.status}): ${
+              error: `Official Telnyx API rejected this key (HTTP ${telnyxRes.status}): ${
                 telnyxData?.errors?.[0]?.detail || 'Invalid Telnyx V2 API key.'
               }`,
             });
           }
-          const balance = telnyxData?.data?.balance || '0.00';
-          const currency = telnyxData?.data?.currency || 'USD';
-          verifiedHandle = fromNum || verifiedHandle || 'Telnyx Verified';
-          verificationMessage = `Verified live with Telnyx API (Account Balance: ${balance} ${currency}).`;
-        }
-      } else if (toolId === 'whatsapp') {
-        const waToken = getCandidateSecret('WHATSAPP_ACCESS_TOKEN');
-        const phoneId = getCandidateSecret('WHATSAPP_PHONE_NUMBER_ID');
-        if (!waToken || !phoneId) {
-          if (!webhookUrl) {
+          if (!fromNum && !verifiedHandle) {
             return res.status(400).json({
               ok: false,
               error:
-                'Both Meta WhatsApp Access Token and WhatsApp Phone Number ID are required.',
+                'Please enter your real Telnyx Phone Number (+1...) so we know which number to send SMS from.',
             });
           }
-        } else {
+          const balance = telnyxData?.data?.balance || '0.00';
+          const currency = telnyxData?.data?.currency || 'USD';
+          verifiedHandle = fromNum || verifiedHandle;
+          verificationMessage = `Verified live with Official Telnyx V2 API (Account Balance: ${balance} ${currency}).`;
+        } else if (!cleanWebhookUrl) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              'Telnyx is NOT connected. Paste either your Official Telnyx V2 API Key (Tab 1) OR a live Make.com / n8n / Zapier Outbound Webhook URL (Tab 2).',
+          });
+        }
+      } else if (toolId === 'whatsapp') {
+        const ultramsgInstance = getCandidateSecret('ULTRAMSG_INSTANCE_ID');
+        const ultramsgToken = getCandidateSecret('ULTRAMSG_TOKEN');
+        const waToken = getCandidateSecret('WHATSAPP_ACCESS_TOKEN');
+        const phoneId = getCandidateSecret('WHATSAPP_PHONE_NUMBER_ID');
+
+        if (waToken && phoneId) {
           const waRes = await fetch(
             `https://graph.facebook.com/v19.0/${encodeURIComponent(
               phoneId
@@ -1202,7 +1394,7 @@ async function startServer() {
           if (!waRes.ok) {
             return res.status(400).json({
               ok: false,
-              error: `Meta WhatsApp Graph API rejected credentials (HTTP ${waRes.status}): ${
+              error: `Official Meta WhatsApp Cloud API rejected credentials (HTTP ${waRes.status}): ${
                 waData?.error?.message || 'Invalid token or Phone Number ID.'
               }`,
             });
@@ -1212,19 +1404,54 @@ async function startServer() {
             waData.verified_name ||
             verifiedHandle ||
             phoneId;
-          verificationMessage = `Verified live with Meta WhatsApp Cloud API (${
+          verificationMessage = `Verified live with Official Meta WhatsApp Cloud API (${
             waData.verified_name || verifiedHandle
           }).`;
-        }
-      } else if (toolId === 'instagram') {
-        const igToken = getCandidateSecret('INSTAGRAM_ACCESS_TOKEN');
-        if (!igToken && !webhookUrl) {
+        } else if (ultramsgInstance && ultramsgToken) {
+          if (!verifiedHandle) {
+            return res.status(400).json({
+              ok: false,
+              error:
+                'Please enter your real WhatsApp phone number (+1...) alongside your Ultramsg Instance ID and Token.',
+            });
+          }
+          const cleanInst = ultramsgInstance.replace(/^instance/i, '');
+          const instPath = `instance${cleanInst}`;
+          const ultraRes = await fetch(
+            `https://api.ultramsg.com/${encodeURIComponent(
+              instPath
+            )}/instance/status?token=${encodeURIComponent(ultramsgToken)}`
+          );
+          const ultraData = await ultraRes.json().catch(() => ({}));
+          const statusVal =
+            ultraData?.status?.accountStatus?.status ||
+            ultraData?.status?.status ||
+            '';
+          if (!ultraRes.ok || ultraData?.error) {
+            return res.status(400).json({
+              ok: false,
+              error: `Ultramsg QR WhatsApp API rejected credentials: ${
+                typeof ultraData?.error === 'string'
+                  ? ultraData.error
+                  : JSON.stringify(
+                      ultraData?.error ||
+                        'Invalid Instance ID or Token from ultramsg.com'
+                    )
+              }`,
+            });
+          }
+          verificationMessage = `Verified live with Ultramsg QR WhatsApp Gateway (${instPath}${
+            statusVal ? ` · Status: ${statusVal}` : ''
+          }).`;
+        } else if (!cleanWebhookUrl) {
           return res.status(400).json({
             ok: false,
             error:
-              'Paste a valid Instagram Graph Access Token or live Webhook URL.',
+              'WhatsApp is NOT connected. Please enter your Official Meta WhatsApp Cloud API credentials (Tab 1), Ultramsg QR credentials, or a live Make.com / n8n / Zapier Outbound Webhook URL (Tab 2).',
           });
         }
+      } else if (toolId === 'instagram') {
+        const igToken = getCandidateSecret('INSTAGRAM_ACCESS_TOKEN');
         if (igToken) {
           const igRes = await fetch(
             `https://graph.facebook.com/v19.0/me?fields=id,name&access_token=${encodeURIComponent(
@@ -1235,23 +1462,28 @@ async function startServer() {
           if (!igRes.ok) {
             return res.status(400).json({
               ok: false,
-              error: `Instagram/Meta Graph API rejected token (HTTP ${igRes.status}): ${
+              error: `Official Instagram/Meta Graph API rejected token (HTTP ${igRes.status}): ${
                 igData?.error?.message || 'Invalid access token.'
               }`,
             });
           }
-          verifiedHandle = igData.name || verifiedHandle || `IG:${igData.id}`;
-          verificationMessage = `Verified live with Meta Graph API (${verifiedHandle}).`;
-        }
-      } else if (toolId === 'facebook') {
-        const fbToken = getCandidateSecret('FACEBOOK_PAGE_ACCESS_TOKEN');
-        if (!fbToken && !webhookUrl) {
+          verifiedHandle = igData.name || verifiedHandle;
+          if (!verifiedHandle) {
+            return res.status(400).json({
+              ok: false,
+              error: 'Please enter your Instagram @handle.',
+            });
+          }
+          verificationMessage = `Verified live with Official Meta Instagram Graph API (${verifiedHandle}).`;
+        } else if (!cleanWebhookUrl) {
           return res.status(400).json({
             ok: false,
             error:
-              'Paste a valid Facebook Page Access Token or live Webhook URL.',
+              'Instagram is NOT connected. Paste either your Official Meta Instagram Graph Access Token (Tab 1) OR a live Make.com / n8n / Zapier Outbound Webhook URL (Tab 2).',
           });
         }
+      } else if (toolId === 'facebook') {
+        const fbToken = getCandidateSecret('FACEBOOK_PAGE_ACCESS_TOKEN');
         if (fbToken) {
           const fbRes = await fetch(
             `https://graph.facebook.com/v19.0/me?fields=id,name&access_token=${encodeURIComponent(
@@ -1262,21 +1494,37 @@ async function startServer() {
           if (!fbRes.ok) {
             return res.status(400).json({
               ok: false,
-              error: `Facebook Graph API rejected token (HTTP ${fbRes.status}): ${
+              error: `Official Facebook Graph API rejected token (HTTP ${fbRes.status}): ${
                 fbData?.error?.message || 'Invalid Page Access Token.'
               }`,
             });
           }
-          verifiedHandle = fbData.name || verifiedHandle || `Page:${fbData.id}`;
-          verificationMessage = `Verified live with Facebook Graph API (Page: ${verifiedHandle}).`;
+          verifiedHandle = fbData.name || verifiedHandle;
+          if (!verifiedHandle) {
+            return res.status(400).json({
+              ok: false,
+              error: 'Please enter your Facebook Page name.',
+            });
+          }
+          verificationMessage = `Verified live with Official Facebook Graph API (Page: ${verifiedHandle}).`;
+        } else if (!cleanWebhookUrl) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              'Facebook is NOT connected. Paste either your Official Facebook Page Access Token (Tab 1) OR a live Make.com / n8n / Zapier Outbound Webhook URL (Tab 2).',
+          });
         }
       } else if (toolId === 'google_maps') {
-        const mapsKey = getCandidateSecret('GOOGLE_MAPS_API_KEY');
+        const mapsKey =
+          getCandidateSecret('GOOGLE_MAPS_API_KEY') ||
+          (getSecretPlain('CUSTOM_LLM_API_KEY').startsWith('AIza')
+            ? getSecretPlain('CUSTOM_LLM_API_KEY')
+            : '');
         if (!mapsKey) {
           return res.status(400).json({
             ok: false,
             error:
-              'Paste your Google API Key (AIza...) to verify Google Maps grounding.',
+              'Google Maps requires a valid Official Google / Gemini API Key (starts with AIza...). Get a key at aistudio.google.com/apikey and paste it below.',
           });
         }
         const gRes = await fetch(
@@ -1288,15 +1536,15 @@ async function startServer() {
         if (!gRes.ok) {
           return res.status(400).json({
             ok: false,
-            error: `Google API rejected this key (HTTP ${gRes.status}): ${
+            error: `Official Google API rejected this key (HTTP ${gRes.status}): ${
               gData?.error?.message || 'Invalid Google API key.'
             }`,
           });
         }
         verifiedHandle =
-          verifiedHandle || `Google API (${maskSecret(mapsKey)})`;
+          verifiedHandle || `Google Maps API (${maskSecret(mapsKey)})`;
         verificationMessage =
-          'Verified live against Google APIs for Maps Grounding.';
+          'Verified live against Official Google APIs for Maps Grounding.';
       } else if (toolId === 'website_leads') {
         const siteDomain = (
           verifiedHandle ||
@@ -1315,27 +1563,130 @@ async function startServer() {
         verificationMessage = `Direct Website Lead Capture active for ${siteDomain}${
           webhookSecret ? ' (Secret Token Protected)' : ''
         }. Ready to receive leads at POST /api/webhooks/website-leads.`;
-      }
-
-      // If a webhookUrl was provided without an API key, verify the webhook URL responds
-      if (!verificationMessage && webhookUrl && webhookUrl.startsWith('http')) {
-        const whRes = await fetch(webhookUrl.trim(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            event: 'atelier_webhook_verification_ping',
-            channelId: toolId,
-            timestamp: new Date().toISOString(),
-          }),
-        });
-        if (!whRes.ok) {
+      } else if (toolId === 'google_calendar') {
+        const hasVerifiedEmailDispatcher = Boolean(
+          getSecretPlain('RESEND_API_KEY') ||
+            getSecretPlain('BREVO_API_KEY') ||
+            getSecretPlain('GMAIL_SMTP_APP_PASSWORD') ||
+            vault.configs?.['gmail']?.verified
+        );
+        if (!hasVerifiedEmailDispatcher) {
           return res.status(400).json({
             ok: false,
-            error: `Webhook endpoint returned HTTP ${whRes.status}. Ensure your webhook URL accepts POST requests.`,
+            error:
+              'To send .ics calendar invites without Google OAuth, first connect your Email provider (Resend, Brevo, or Gmail App Password) in the "Email & Gmail" tab.',
           });
         }
-        verifiedHandle = verifiedHandle || 'Verified Webhook';
-        verificationMessage = `Webhook verified live (HTTP ${whRes.status}).`;
+        const calEmail = (
+          verifiedHandle ||
+          getSecretPlain('RESEND_FROM_EMAIL') ||
+          getSecretPlain('BREVO_FROM_EMAIL') ||
+          getSecretPlain('GMAIL_SMTP_USER') ||
+          vault.configs?.['gmail']?.accountHandle ||
+          ''
+        ).trim();
+        if (!calEmail) {
+          return res.status(400).json({
+            ok: false,
+            error: 'Please enter your calendar email address.',
+          });
+        }
+        verifiedHandle = calEmail;
+        verificationMessage = `Active: Brokerage Master Schedule & .ics Calendar Invite Dispatcher (${calEmail}). Emails real .ics calendar invites via your connected email provider.`;
+      }
+
+      // If an Outbound Webhook URL was provided without an Official API key, strictly validate both handle and external webhook URL
+      if (!verificationMessage && cleanWebhookUrl) {
+        if (!verifiedHandle) {
+          return res.status(400).json({
+            ok: false,
+            error: `Please enter your real ${toolId.toUpperCase()} account handle or phone number (e.g. @your_instagram or +1310...) in the Account Handle box before connecting your webhook. We never generate fake handles.`,
+          });
+        }
+        if (!cleanWebhookUrl.startsWith('http')) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              'Outbound Webhook URL must start with https:// or http:// (copy the Custom Webhook URL generated inside Make.com, n8n, or Zapier).',
+          });
+        }
+        const reqHost = (req.headers.host || '').toLowerCase();
+        if (
+          cleanWebhookUrl.includes('/api/webhooks/') ||
+          (reqHost && cleanWebhookUrl.toLowerCase().includes(reqHost))
+        ) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              'You pasted your Atelier CRM Inbound URL into the Outbound Webhook box! For Outbound Webhook URL, you must paste the external webhook URL generated by Make.com (https://hook...make.com/...), n8n, or Zapier (https://hooks.zapier.com/...).',
+          });
+        }
+
+        let whRes: Response;
+        try {
+          whRes = await fetch(cleanWebhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              event: 'atelier_webhook_verification_ping',
+              channelId: toolId,
+              accountHandle: verifiedHandle,
+              recipient: '+13105550199',
+              messageBody: `Atelier Estate CRM live webhook verification ping for ${verifiedHandle}`,
+              timestamp: new Date().toISOString(),
+            }),
+          });
+        } catch (err: any) {
+          recordWebhookDiagnosticEvent({
+            direction: 'VERIFY_PING',
+            channelId: toolId,
+            endpointPath: cleanWebhookUrl,
+            httpStatus: 0,
+            status: 'NETWORK_ERROR',
+            summary: `Outbound Webhook verification failed for ${toolId}`,
+            errorReason: err?.message || 'Network error',
+            rawPayload: { cleanWebhookUrl, verifiedHandle },
+          });
+          return res.status(400).json({
+            ok: false,
+            error: `Could not reach Outbound Webhook URL (${cleanWebhookUrl}): ${
+              err?.message || 'Network error'
+            }`,
+          });
+        }
+        if (!whRes.ok) {
+          recordWebhookDiagnosticEvent({
+            direction: 'VERIFY_PING',
+            channelId: toolId,
+            endpointPath: cleanWebhookUrl,
+            httpStatus: whRes.status,
+            status: 'AUTH_ERROR',
+            summary: `Outbound Webhook returned HTTP ${whRes.status}`,
+            errorReason: `HTTP ${whRes.status} from ${cleanWebhookUrl}. Make sure your Make.com / n8n scenario is turned ON or listening for data.`,
+            rawPayload: { cleanWebhookUrl, verifiedHandle },
+          });
+          return res.status(400).json({
+            ok: false,
+            error: `Outbound Webhook endpoint returned HTTP ${whRes.status}. In Make.com, click "Run once" (or turn the scenario ON) so your Custom Webhook is actively listening, then click Verify again.`,
+          });
+        }
+        recordWebhookDiagnosticEvent({
+          direction: 'VERIFY_PING',
+          channelId: toolId,
+          endpointPath: cleanWebhookUrl,
+          httpStatus: whRes.status,
+          status: 'SUCCESS',
+          summary: `Verified live Outbound Webhook (${new URL(cleanWebhookUrl).hostname}) for ${verifiedHandle}`,
+          rawPayload: { cleanWebhookUrl, verifiedHandle },
+        });
+        verificationMessage = `Live Outbound Webhook verified (HTTP ${whRes.status} from ${new URL(cleanWebhookUrl).hostname}).`;
+      }
+
+      if (!verificationMessage) {
+        return res.status(400).json({
+          ok: false,
+          error: `Cannot mark ${toolId.toUpperCase()} as Connected. Please provide either your Official API Key (Tab 1) or a live Make.com / n8n / Zapier Outbound Webhook URL + your real account handle (Tab 2).`,
+        });
       }
 
       // Save only after live verification passes!
@@ -1535,8 +1886,205 @@ async function startServer() {
   });
 
   // ============================================================================
-  // 3b-3. DIRECT AGENCY WEBSITE LEAD RECEIVER WEBHOOK (CORS + LIVE INGESTION)
+  // 3b-3. DIRECT AGENCY WEBSITE & OMNICHANNEL LEAD RECEIVER WEBHOOKS + HEALTH DIAGNOSTICS
   // ============================================================================
+  const handleInboundWebhookRequest = (
+    req: express.Request,
+    res: express.Response,
+    routeChannelId?: string
+  ) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const rawBody =
+      req.body && typeof req.body === 'object' ? req.body : ({} as any);
+    const endpointPath = `POST ${req.path}`;
+    const receivedKeys = Object.keys(rawBody);
+    const expectedKeys = [
+      'name (or fullName / first_name / data.pushname)',
+      'email (or buyer_email)',
+      'phone (or phone_number / whatsapp_phone / data.from)',
+      'propertyInterest (optional)',
+      'budget (optional)',
+    ];
+
+    // Determine target channel from URL param or payload source
+    const rawSource = String(rawBody.source || '').toLowerCase();
+    const inferredChannel =
+      routeChannelId ||
+      (rawSource.includes('whatsapp') || rawBody?.data?.from
+        ? 'whatsapp'
+        : rawSource.includes('instagram')
+        ? 'instagram'
+        : rawSource.includes('facebook')
+        ? 'facebook'
+        : rawSource.includes('telnyx') || rawSource.includes('sms')
+        ? 'telnyx'
+        : 'website_leads');
+
+    const configuredSecret = getSecretPlain('WEBSITE_WEBHOOK_SECRET');
+    const providedSecret =
+      (req.headers['x-webhook-secret'] as string) ||
+      rawBody.webhookSecret ||
+      '';
+
+    if (
+      configuredSecret &&
+      providedSecret &&
+      configuredSecret !== String(providedSecret).trim()
+    ) {
+      const errReason =
+        'Header X-Webhook-Secret (or body.webhookSecret) does not match the configured WEBSITE_WEBHOOK_SECRET in your vault.';
+      recordWebhookDiagnosticEvent({
+        direction: 'INBOUND',
+        channelId: inferredChannel,
+        endpointPath,
+        httpStatus: 401,
+        status: 'AUTH_ERROR',
+        summary: 'Rejected Inbound Webhook: Invalid X-Webhook-Secret',
+        errorReason: errReason,
+        rawPayload: rawBody,
+        receivedKeys,
+        expectedKeys,
+      });
+      return res.status(401).json({
+        ok: false,
+        error: 'Invalid X-Webhook-Secret for Agency Website Lead Receiver.',
+        diagnostic: errReason,
+      });
+    }
+
+    // Normalize across standard JSON, Ultramsg ({ data: { from, pushname, body } }), ManyChat ({ first_name, last_name, whatsapp_phone }), and Meta/Zapier ({ full_name, phone_number })
+    const nestedData =
+      rawBody.data && typeof rawBody.data === 'object' ? rawBody.data : {};
+    const cleanName = String(
+      rawBody.name ||
+        rawBody.fullName ||
+        rawBody.full_name ||
+        (rawBody.first_name
+          ? `${rawBody.first_name} ${rawBody.last_name || ''}`.trim()
+          : '') ||
+        nestedData.pushname ||
+        nestedData.notifyName ||
+        ''
+    ).trim();
+
+    const cleanEmail = String(
+      rawBody.email || rawBody.buyer_email || nestedData.email || ''
+    ).trim();
+
+    const cleanPhone = String(
+      rawBody.phone ||
+        rawBody.phone_number ||
+        rawBody.whatsapp_phone ||
+        nestedData.from ||
+        nestedData.author ||
+        ''
+    )
+      .replace(/@c\.us$/i, '')
+      .trim();
+
+    if (!cleanName && !cleanEmail && !cleanPhone) {
+      const errReason =
+        receivedKeys.length === 0
+          ? 'Empty JSON payload ({}) received. External provider sent a POST request with an empty body or wrong Content-Type header (must be application/json).'
+          : `Malformed payload: Missing required contact identifier. Expected at least one of [name, fullName, email, phone, data.from], but external provider only sent keys: [${receivedKeys.join(
+              ', '
+            )}].`;
+
+      recordWebhookDiagnosticEvent({
+        direction: 'INBOUND',
+        channelId: inferredChannel,
+        endpointPath,
+        httpStatus: 400,
+        status: 'PAYLOAD_ERROR',
+        summary: `Payload Schema Mismatch on ${endpointPath}`,
+        errorReason: errReason,
+        rawPayload: rawBody,
+        receivedKeys,
+        expectedKeys,
+      });
+
+      return res.status(400).json({
+        ok: false,
+        error:
+          'Webhook lead payload must include at least name, email, or phone.',
+        diagnostic: errReason,
+        receivedKeys,
+        expectedKeys,
+      });
+    }
+
+    const vault = loadVault();
+    const domainLabel =
+      String(rawBody.websiteDomain || '').trim() ||
+      vault.configs?.[inferredChannel]?.accountHandle ||
+      vault.configs?.['website_leads']?.accountHandle ||
+      (inferredChannel === 'whatsapp'
+        ? 'WhatsApp Business'
+        : inferredChannel === 'instagram'
+        ? 'Instagram DM'
+        : inferredChannel === 'facebook'
+        ? 'Facebook Lead Ads'
+        : inferredChannel === 'telnyx'
+        ? 'Telnyx Voice / SMS'
+        : 'Agency Website');
+
+    const sourceDisplay =
+      String(rawBody.source || '').trim() ||
+      (inferredChannel === 'website_leads'
+        ? `Website (${domainLabel.replace(/^https?:\/\//, '')})`
+        : domainLabel);
+
+    const newLead: InboundWebsiteLeadRecord = {
+      id: `weblead-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: cleanName || `Inbound ${sourceDisplay} Lead`,
+      email: cleanEmail || 'inquiry@website-lead.com',
+      phone: cleanPhone || 'Not provided',
+      source: sourceDisplay,
+      budget: String(rawBody.budget || '$5,000,000').trim(),
+      timeline: String(rawBody.timeline || '30 Days').trim(),
+      propertyInterest: String(
+        rawBody.propertyInterest ||
+          rawBody.listingTitle ||
+          nestedData.body ||
+          'Villa Solaris Promontory'
+      )
+        .slice(0, 120)
+        .trim(),
+      qualificationScore: 93,
+      status: 'AI Qualified',
+      assignedEmployeeId: 'marcus',
+      notes:
+        String(rawBody.message || rawBody.notes || nestedData.body || '').trim() ||
+        `Received via ${endpointPath} (${domainLabel}). Auto-qualified by Marcus Thorne.`,
+      websiteDomain: domainLabel,
+      receivedAtIso: new Date().toISOString(),
+    };
+
+    inboundWebsiteLeads.unshift(newLead);
+    if (inboundWebsiteLeads.length > 50) {
+      inboundWebsiteLeads.pop();
+    }
+
+    recordWebhookDiagnosticEvent({
+      direction: 'INBOUND',
+      channelId: inferredChannel,
+      endpointPath,
+      httpStatus: 200,
+      status: 'SUCCESS',
+      summary: `Synced Lead "${newLead.name}" (${newLead.phone !== 'Not provided' ? newLead.phone : newLead.email}) into CRM`,
+      rawPayload: rawBody,
+      receivedKeys,
+      expectedKeys,
+    });
+
+    return res.json({
+      ok: true,
+      lead: newLead,
+      endpointPath,
+      message: `Lead "${newLead.name}" captured via ${endpointPath} and routed to AI Lead Manager Marcus Thorne.`,
+    });
+  };
+
   app.options('/api/webhooks/website-leads', (_req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
@@ -1547,90 +2095,27 @@ async function startServer() {
     res.sendStatus(204);
   });
 
-  app.post('/api/webhooks/website-leads', (req, res) => {
+  app.options('/api/webhooks/inbound/:channelId', (_req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    const {
-      name,
-      fullName,
-      email,
-      phone,
-      budget,
-      timeline,
-      propertyInterest,
-      listingTitle,
-      message,
-      notes,
-      websiteDomain,
-      webhookSecret,
-    } = (req.body || {}) as Record<string, string>;
-
-    const configuredSecret = getSecretPlain('WEBSITE_WEBHOOK_SECRET');
-    const providedSecret =
-      (req.headers['x-webhook-secret'] as string) || webhookSecret || '';
-
-    if (
-      configuredSecret &&
-      providedSecret &&
-      configuredSecret !== providedSecret.trim()
-    ) {
-      return res.status(401).json({
-        ok: false,
-        error: 'Invalid X-Webhook-Secret for Agency Website Lead Receiver.',
-      });
-    }
-
-    const cleanName = (name || fullName || '').trim();
-    const cleanEmail = (email || '').trim();
-    const cleanPhone = (phone || '').trim();
-
-    if (!cleanName && !cleanEmail && !cleanPhone) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          'Website lead payload must include at least name, email, or phone.',
-      });
-    }
-
-    const vault = loadVault();
-    const domainLabel =
-      (websiteDomain || '').trim() ||
-      vault.configs?.['website_leads']?.accountHandle ||
-      'Agency Website';
-
-    const newLead: InboundWebsiteLeadRecord = {
-      id: `weblead-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      name: cleanName || 'Website Inquiry Client',
-      email: cleanEmail || 'inquiry@website-lead.com',
-      phone: cleanPhone || '+1 (555) 019-2831',
-      source: `Website (${domainLabel.replace(/^https?:\/\//, '')})`,
-      budget: (budget || '$5,000,000').trim(),
-      timeline: (timeline || '30 Days').trim(),
-      propertyInterest: (
-        propertyInterest ||
-        listingTitle ||
-        'Villa Solaris Promontory'
-      ).trim(),
-      qualificationScore: 93,
-      status: 'AI Qualified',
-      assignedEmployeeId: 'marcus',
-      notes:
-        (message || notes || '').trim() ||
-        `Received directly from agency website (${domainLabel}). Auto-qualified by Marcus Thorne.`,
-      websiteDomain: domainLabel,
-      receivedAtIso: new Date().toISOString(),
-    };
-
-    inboundWebsiteLeads.unshift(newLead);
-    if (inboundWebsiteLeads.length > 50) {
-      inboundWebsiteLeads.pop();
-    }
-
-    return res.json({
-      ok: true,
-      lead: newLead,
-      message: `Lead "${newLead.name}" captured from ${domainLabel} and routed to AI Lead Manager Marcus Thorne.`,
-    });
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, X-Webhook-Secret'
+    );
+    res.sendStatus(204);
   });
+
+  app.post('/api/webhooks/website-leads', (req, res) =>
+    handleInboundWebhookRequest(req, res)
+  );
+
+  app.post('/api/webhooks/inbound/:channelId', (req, res) =>
+    handleInboundWebhookRequest(
+      req,
+      res,
+      String(req.params.channelId || 'website_leads').toLowerCase()
+    )
+  );
 
   app.get('/api/webhooks/website-leads', (_req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1638,6 +2123,193 @@ async function startServer() {
       ok: true,
       leads: inboundWebsiteLeads,
     });
+  });
+
+  // 3b-4. WEBHOOK HEALTH & DIAGNOSTIC VISUALIZER ENDPOINTS
+  app.get('/api/webhooks/health', (_req, res) => {
+    const vault = loadVault();
+    const endpointSpecs = [
+      {
+        channelId: 'website_leads',
+        channelName: 'Agency Website Leads',
+        inboundPath: '/api/webhooks/website-leads',
+        alternatePath: '/api/webhooks/inbound/website_leads',
+        method: 'POST',
+        expectedProviders:
+          'Elementor, Webflow, WordPress, Typeform, Make.com, Zapier',
+        requiredFields: ['name (or fullName)', 'email', 'phone'],
+        optionalFields: [
+          'propertyInterest',
+          'budget',
+          'timeline',
+          'notes',
+          'websiteDomain',
+        ],
+        samplePayload: {
+          name: 'Henrik Lindqvist',
+          email: 'henrik@nordiccapital.se',
+          phone: '+13105550199',
+          budget: '$14,850,000',
+          propertyInterest: 'Villa Solaris Promontory',
+          source: 'Agency Website',
+        },
+      },
+      {
+        channelId: 'whatsapp',
+        channelName: 'WhatsApp Business',
+        inboundPath: '/api/webhooks/inbound/whatsapp',
+        alternatePath: '/api/webhooks/website-leads',
+        method: 'POST',
+        expectedProviders:
+          'Ultramsg Webhook, Wati, ManyChat, Make.com, Zapier',
+        requiredFields: [
+          'name (or data.pushname / first_name)',
+          'phone (or data.from / whatsapp_phone)',
+        ],
+        optionalFields: ['propertyInterest (or data.body)', 'budget', 'email'],
+        samplePayload: {
+          name: 'Aarav Singhania',
+          phone: '+919820144910',
+          propertyInterest: 'The Mercer Penthouse',
+          budget: '$9,450,000',
+          source: 'WhatsApp Business',
+        },
+      },
+      {
+        channelId: 'instagram',
+        channelName: 'Instagram DM Automation',
+        inboundPath: '/api/webhooks/inbound/instagram',
+        alternatePath: '/api/webhooks/website-leads',
+        method: 'POST',
+        expectedProviders: 'ManyChat Instagram Automation, Make.com, Zapier',
+        requiredFields: ['name (or first_name)', 'phone (or email)'],
+        optionalFields: ['propertyInterest', 'budget', 'notes'],
+        samplePayload: {
+          name: 'Sora Takahashi',
+          email: 'sora@studio-kengo.io',
+          phone: '+19174428810',
+          propertyInterest: 'The Mercer Cast-Iron Penthouse',
+          source: 'Instagram DM',
+        },
+      },
+      {
+        channelId: 'facebook',
+        channelName: 'Facebook Lead Ads',
+        inboundPath: '/api/webhooks/inbound/facebook',
+        alternatePath: '/api/webhooks/website-leads',
+        method: 'POST',
+        expectedProviders:
+          'Make.com Facebook Lead Ads Module, Zapier Lead Ads, LeadBridge',
+        requiredFields: ['name (or full_name)', 'email', 'phone (or phone_number)'],
+        optionalFields: ['propertyInterest', 'budget', 'timeline'],
+        samplePayload: {
+          full_name: 'Devon Mercer',
+          email: 'dmercer@apexsovereign.vc',
+          phone_number: '+14159901122',
+          propertyInterest: 'Point Dume Sanctuary',
+          source: 'Facebook Lead Ads',
+        },
+      },
+      {
+        channelId: 'telnyx',
+        channelName: 'Telnyx Voice & SMS',
+        inboundPath: '/api/webhooks/inbound/telnyx',
+        alternatePath: '/api/webhooks/website-leads',
+        method: 'POST',
+        expectedProviders: 'Telnyx Inbound Webhook, Vapi, Bland AI, Make.com',
+        requiredFields: ['phone (or data.from)', 'name (optional)'],
+        optionalFields: ['notes (or data.body)', 'propertyInterest'],
+        samplePayload: {
+          name: 'Inbound SMS Buyer',
+          phone: '+13105550144',
+          notes: 'Interested in scheduling a Saturday tour at Villa Solaris',
+          source: 'Telnyx SMS',
+        },
+      },
+    ];
+
+    const diagnostics = endpointSpecs.map((spec) => {
+      const cfg = vault.configs?.[spec.channelId];
+      const stat = webhookHealthState.channelStats[spec.channelId] || {
+        channelId: spec.channelId,
+        lastInboundAtIso: null,
+        lastOutboundAtIso: null,
+        lastErrorAtIso: null,
+        lastErrorDetail: null,
+        inboundCount: 0,
+        outboundCount: 0,
+        errorCount: 0,
+      };
+      const isConnected = Boolean(cfg?.verified);
+
+      let syncStatus:
+        | 'HEALTHY_SYNCING'
+        | 'CONNECTED_NO_INBOUND_YET'
+        | 'PAYLOAD_ERROR_DETECTED'
+        | 'NOT_CONNECTED' = 'NOT_CONNECTED';
+      let diagnosisExplanation = '';
+
+      if (
+        stat.lastErrorAtIso &&
+        (!stat.lastInboundAtIso ||
+          stat.lastErrorAtIso >= stat.lastInboundAtIso)
+      ) {
+        syncStatus = 'PAYLOAD_ERROR_DETECTED';
+        diagnosisExplanation = `External provider reached ${spec.inboundPath}, but the last payload failed validation: ${stat.lastErrorDetail}`;
+      } else if (isConnected && stat.inboundCount > 0) {
+        syncStatus = 'HEALTHY_SYNCING';
+        diagnosisExplanation = `Credentials verified AND inbound webhooks are actively syncing (${stat.inboundCount} received).`;
+      } else if (isConnected && stat.inboundCount === 0) {
+        syncStatus = 'CONNECTED_NO_INBOUND_YET';
+        diagnosisExplanation = `Why it shows "Connected" without syncing data: Your outbound credentials (${
+          cfg?.accountHandle || 'API / Webhook'
+        }) are verified for sending, but the external provider (${
+          spec.expectedProviders
+        }) has sent 0 POST requests to ${
+          spec.inboundPath
+        }. Paste ${spec.inboundPath} into your provider's webhook settings.`;
+      } else if (!isConnected && stat.inboundCount > 0) {
+        syncStatus = 'HEALTHY_SYNCING';
+        diagnosisExplanation = `Inbound webhooks ARE arriving at ${spec.inboundPath} (${stat.inboundCount} received), even though outbound credentials are not connected yet.`;
+      } else {
+        syncStatus = 'NOT_CONNECTED';
+        diagnosisExplanation = `Channel is not connected and 0 inbound webhooks have been received at ${spec.inboundPath}.`;
+      }
+
+      return {
+        ...spec,
+        connected: isConnected,
+        accountHandle: cfg?.accountHandle || '',
+        verifiedDetail: cfg?.verifiedDetail || '',
+        outboundWebhookUrl: cfg?.webhookUrl || '',
+        stat,
+        syncStatus,
+        diagnosisExplanation,
+      };
+    });
+
+    return res.json({
+      ok: true,
+      lastReceivedAtIso: webhookHealthState.lastReceivedAtIso,
+      lastErrorAtIso: webhookHealthState.lastErrorAtIso,
+      totalInboundReceived: webhookHealthState.totalInboundReceived,
+      totalInboundRejected: webhookHealthState.totalInboundRejected,
+      totalOutboundDispatched: webhookHealthState.totalOutboundDispatched,
+      totalOutboundFailed: webhookHealthState.totalOutboundFailed,
+      diagnostics,
+      recentLogs: webhookHealthState.recentLogs,
+    });
+  });
+
+  app.post('/api/webhooks/health/clear', (_req, res) => {
+    webhookHealthState.recentLogs = [];
+    webhookHealthState.lastErrorAtIso = null;
+    for (const ch of Object.values(webhookHealthState.channelStats)) {
+      ch.lastErrorAtIso = null;
+      ch.lastErrorDetail = null;
+      ch.errorCount = 0;
+    }
+    return res.json({ ok: true });
   });
 
   // 3c. Live API Key Auto-Detection & Real-Time Model Fetching Endpoint
@@ -2087,29 +2759,119 @@ User Request:
 
       const proposed = parsed.proposedAction || { actionType: 'NONE' };
 
-      // Deterministic safeguard: if user prompt explicitly asks to send an email and includes an email address, ensure GMAIL_SEND is triggered
+      // Deterministic safeguards: if user prompt explicitly asks to use an external channel, ensure the corresponding actionType is set
       const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/;
+      const phoneRegex = /(\+?[0-9][0-9\s\-()]{6,18}[0-9])/;
       const emailMatch = String(taskPrompt || '').match(emailRegex);
+      const phoneMatch = String(taskPrompt || '').match(phoneRegex);
       const lowerPrompt = String(taskPrompt || '').toLowerCase();
+
+      if (proposed.actionType === 'NONE') {
+        if (lowerPrompt.includes('whatsapp')) {
+          proposed.actionType = 'WEBHOOK_OR_SMS_DISPATCH';
+          proposed.targetChannel = 'whatsapp';
+          proposed.recipientPhoneOrHandle =
+            proposed.recipientPhoneOrHandle ||
+            (phoneMatch ? phoneMatch[1].trim() : '');
+          proposed.smsOrPostBody =
+            proposed.smsOrPostBody || parsed.reply || String(taskPrompt);
+        } else if (
+          lowerPrompt.includes('sms') ||
+          lowerPrompt.includes('telnyx') ||
+          lowerPrompt.includes('text message')
+        ) {
+          proposed.actionType = 'WEBHOOK_OR_SMS_DISPATCH';
+          proposed.targetChannel = 'telnyx';
+          proposed.recipientPhoneOrHandle =
+            proposed.recipientPhoneOrHandle ||
+            (phoneMatch ? phoneMatch[1].trim() : '');
+          proposed.smsOrPostBody =
+            proposed.smsOrPostBody || parsed.reply || String(taskPrompt);
+        } else if (
+          lowerPrompt.includes('instagram') &&
+          (lowerPrompt.includes('dm') ||
+            lowerPrompt.includes('send') ||
+            lowerPrompt.includes('message') ||
+            lowerPrompt.includes('post') ||
+            lowerPrompt.includes('publish'))
+        ) {
+          proposed.actionType = 'WEBHOOK_OR_SMS_DISPATCH';
+          proposed.targetChannel = 'instagram';
+          proposed.smsOrPostBody =
+            proposed.smsOrPostBody || parsed.reply || String(taskPrompt);
+        } else if (
+          lowerPrompt.includes('facebook') &&
+          (lowerPrompt.includes('send') ||
+            lowerPrompt.includes('message') ||
+            lowerPrompt.includes('post') ||
+            lowerPrompt.includes('publish'))
+        ) {
+          proposed.actionType = 'WEBHOOK_OR_SMS_DISPATCH';
+          proposed.targetChannel = 'facebook';
+          proposed.smsOrPostBody =
+            proposed.smsOrPostBody || parsed.reply || String(taskPrompt);
+        } else if (
+          (lowerPrompt.includes('send') ||
+            lowerPrompt.includes('email') ||
+            lowerPrompt.includes('mail')) &&
+          emailMatch
+        ) {
+          proposed.actionType = 'GMAIL_SEND';
+          proposed.recipientEmail = proposed.recipientEmail || emailMatch[1];
+          proposed.emailSubject =
+            proposed.emailSubject || 'Follow-Up from Atelier Estate';
+          proposed.emailBody =
+            proposed.emailBody || parsed.reply || String(taskPrompt);
+        }
+      }
+
+      // Check real connection state from connectedTools and vault so the bot NEVER lies that it sent via an unconnected app
+      const toolsArray = Array.isArray(connectedTools) ? connectedTools : [];
+      const isChannelConnected = (id: string) => {
+        const fromClient = toolsArray.find((t: any) => t.id === id);
+        if (fromClient && typeof fromClient.connected === 'boolean') {
+          return fromClient.connected;
+        }
+        return Boolean(vault.configs?.[id]?.verified);
+      };
+
+      let finalReply = parsed.reply || 'Task processed.';
+      let finalActionSummary =
+        parsed.actionSummary || `${usedProvider} · ${usedModel}`;
+
       if (
-        proposed.actionType === 'NONE' &&
-        (lowerPrompt.includes('send') ||
-          lowerPrompt.includes('email') ||
-          lowerPrompt.includes('mail')) &&
-        emailMatch
+        proposed.actionType === 'WEBHOOK_OR_SMS_DISPATCH' &&
+        proposed.targetChannel
       ) {
-        proposed.actionType = 'GMAIL_SEND';
-        proposed.recipientEmail = proposed.recipientEmail || emailMatch[1];
-        proposed.emailSubject =
-          proposed.emailSubject || 'Follow-Up from Atelier Estate';
-        proposed.emailBody =
-          proposed.emailBody || parsed.reply || String(taskPrompt);
+        const ch = String(proposed.targetChannel).toLowerCase();
+        if (!isChannelConnected(ch)) {
+          finalActionSummary = `${ch.toUpperCase()} Not Connected`;
+          finalReply = `⚠️ I have drafted the ${ch.toUpperCase()} message below, but I **cannot send it** because **${ch.toUpperCase()} is NOT connected** yet.\n\nDraft prepared:\n"${
+            proposed.smsOrPostBody || finalReply
+          }"`;
+        }
+      } else if (
+        proposed.actionType === 'GMAIL_SEND' ||
+        proposed.actionType === 'CONTACT_HUMAN_AGENT'
+      ) {
+        if (!isChannelConnected('gmail')) {
+          finalActionSummary = 'Email Not Connected';
+          finalReply = `⚠️ I have drafted the email to ${
+            proposed.recipientEmail ||
+            proposed.humanAgentEmail ||
+            'the recipient'
+          } below, but I **cannot send it** because **Email / Gmail is NOT connected** yet.`;
+        }
+      } else if (proposed.actionType === 'MAPS_SEARCH') {
+        if (!isChannelConnected('google_maps')) {
+          finalActionSummary = 'Google Maps Not Connected';
+          finalReply = `⚠️ I cannot run a live Google Maps Grounding lookup yet because **Google Maps is NOT connected** in Connected Apps & Website.`;
+        }
       }
 
       res.json({
-        reply: parsed.reply || 'Task processed.',
-        actionSummary:
-          parsed.actionSummary || `${usedProvider} · ${usedModel}`,
+        reply: finalReply,
+        actionSummary: finalActionSummary,
         proposedAction: proposed,
       });
     } catch (error: any) {
@@ -2402,53 +3164,251 @@ ${JSON.stringify(reminderItems, null, 2)}`;
       ? vaultLlmKey
       : '';
 
-    if (!geminiKey) {
-      return res.status(400).json({
-        ok: false,
-        summary:
-          '❌ Google Maps Grounding is not configured. Open Connected Apps -> Google Maps and paste your Google API Key (AIza...).',
-        places: [],
-      });
+    if (geminiKey) {
+      try {
+        const ai = new GoogleGenAI({ apiKey: geminiKey });
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: `Provide real-world real estate neighborhood intelligence, nearby amenities, and market context for: "${query}" near "${
+            location || 'New York / Los Angeles'
+          }". Keep it concise and structured.`,
+          config: {
+            tools: [{ googleMaps: {} }],
+          },
+        });
+
+        const chunks =
+          response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+        const places = chunks
+          .map((c: any) => ({
+            title: c.maps?.title || c.web?.title || 'Verified Location',
+            uri: c.maps?.uri || c.web?.uri || 'https://maps.google.com',
+          }))
+          .filter((p: any) => p.title);
+
+        return res.json({
+          ok: true,
+          summary: response.text || 'Completed neighborhood lookup.',
+          places,
+        });
+      } catch (error: any) {
+        return res.status(400).json({
+          ok: false,
+          summary: `❌ Google Maps API error: ${
+            error?.message || 'Unable to reach Maps grounding'
+          }`,
+          places: [],
+        });
+      }
     }
 
-    try {
-      const ai = new GoogleGenAI({ apiKey: geminiKey });
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `Provide real-world real estate neighborhood intelligence, nearby amenities, and market context for: "${query}" near "${
-          location || 'New York / Los Angeles'
-        }". Keep it concise and structured.`,
-        config: {
-          tools: [{ googleMaps: {} }],
-        },
-      });
+    // Fallback for Simple Direct Mode when user has a non-Google LLM API Key (e.g., Groq, OpenAI, Claude)
+    const vault = loadVault();
+    const fallbackLlmKey = headerApiKey || vaultLlmKey;
+    const headerProvider = ((req.headers['x-llm-provider'] as string) || 'groq') as any;
+    const headerModel = (req.headers['x-llm-model'] as string) || '';
+    const headerBaseUrl = (req.headers['x-llm-base-url'] as string) || '';
 
-      const chunks =
-        response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-      const places = chunks
-        .map((c: any) => ({
-          title: c.maps?.title || c.web?.title || 'Verified Location',
-          uri: c.maps?.uri || c.web?.uri || 'https://maps.google.com',
-        }))
-        .filter((p: any) => p.title);
+    if (fallbackLlmKey && vault.configs?.['google_maps']?.verified) {
+      try {
+        const locStr = location || vault.configs?.['google_maps']?.accountHandle || 'Manhattan, NY';
+        const { data: parsed } = await callUniversalLlmJson({
+          provider: headerProvider,
+          model: headerModel,
+          apiKey: fallbackLlmKey,
+          customBaseUrl: headerBaseUrl,
+          systemInstruction:
+            'You are a luxury real estate neighborhood specialist. Return JSON with "summary" (string) and "landmarks" (array of 3 landmark or neighborhood names).',
+          userPrompt: `Provide real estate neighborhood intelligence, school districts, and amenities for "${query}" in "${locStr}".`,
+          geminiSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              landmarks: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+            },
+            required: ['summary', 'landmarks'],
+          },
+        });
 
-      res.json({
-        ok: true,
-        summary: response.text || 'Completed neighborhood lookup.',
-        places,
-      });
-    } catch (error: any) {
-      res.status(400).json({
-        ok: false,
-        summary: `❌ Google Maps API error: ${
-          error?.message || 'Unable to reach Maps grounding'
-        }`,
-        places: [],
-      });
+        const landmarks: string[] = Array.isArray(parsed?.landmarks)
+          ? parsed.landmarks
+          : [`${query} ${locStr}`];
+        const places = landmarks.map((lm) => ({
+          title: `${lm} (Open in Google Maps)`,
+          uri: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+            `${lm} ${locStr}`
+          )}`,
+        }));
+
+        return res.json({
+          ok: true,
+          summary:
+            parsed?.summary ||
+            `Neighborhood intelligence for ${query} (${locStr}).`,
+          places,
+        });
+      } catch (err: any) {
+        return res.status(400).json({
+          ok: false,
+          summary: `❌ Maps lookup error: ${err?.message || 'Failed'}`,
+          places: [],
+        });
+      }
     }
+
+    return res.status(400).json({
+      ok: false,
+      summary:
+        '❌ Google Maps is not connected. Open Connected Apps -> Google Maps and either paste an Official Google API Key (AIza...) or activate Simple Direct Mode.',
+      places: [],
+    });
   });
 
-  // 7. Outbound Channel Dispatch (Telnyx SMS / WhatsApp Cloud API / Meta Graph / Custom Webhook)
+  // 6b. Hosted Buyer Inquiry Form for Non-Technical Users (Zero Make/Zapier Automations Required)
+  app.get('/inquiry/:channelId', (req, res) => {
+    const rawChannel = (req.params.channelId || 'whatsapp').toLowerCase();
+    const channelMap: Record<
+      string,
+      { label: string; badge: string; accent: string }
+    > = {
+      whatsapp: {
+        label: 'WhatsApp Business',
+        badge: 'Official WhatsApp VIP Inquiry Desk',
+        accent: '#059669',
+      },
+      instagram: {
+        label: 'Instagram DM',
+        badge: 'Instagram VIP Property Concierge',
+        accent: '#e11d48',
+      },
+      facebook: {
+        label: 'Facebook Lead Ads',
+        badge: 'Facebook Page Property Inquiry',
+        accent: '#2563eb',
+      },
+      telnyx: {
+        label: 'Inbound Phone / SMS',
+        badge: 'Direct SMS & Callback Priority Desk',
+        accent: '#0f172a',
+      },
+    };
+    const meta = channelMap[rawChannel] || channelMap.whatsapp;
+    const vault = loadVault();
+    const acctHandle =
+      vault.configs?.[rawChannel]?.accountHandle || 'Atelier Estate Brokerage';
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${meta.badge} — ${acctHandle}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-slate-950 text-white flex items-center justify-center p-4">
+  <div class="max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-5">
+    <div class="space-y-1.5">
+      <span class="inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+        ${meta.badge}
+      </span>
+      <h1 class="text-xl font-bold text-white">${acctHandle}</h1>
+      <p class="text-xs text-slate-400">
+        Submit your property criteria below. Your inquiry is routed directly into our brokerage CRM and assigned to a dedicated specialist immediately.
+      </p>
+    </div>
+
+    <form id="leadForm" class="space-y-3.5">
+      <div>
+        <label class="block text-xs font-semibold text-slate-300 mb-1">Full Name *</label>
+        <input required name="name" type="text" placeholder="e.g. Victoria Sterling" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-emerald-400" />
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">WhatsApp / Phone *</label>
+          <input required name="phone" type="tel" placeholder="+1 310 555 0199" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-emerald-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">Email Address *</label>
+          <input required name="email" type="email" placeholder="you@domain.com" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-emerald-400" />
+        </div>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">Target Budget</label>
+          <input name="budget" type="text" placeholder="$4,500,000" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-emerald-400" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1">Timeline</label>
+          <select name="timeline" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-emerald-400">
+            <option value="Immediate (Cash / Pre-Approved)">Immediate (0-30 Days)</option>
+            <option value="1-3 Months">1-3 Months</option>
+            <option value="3-6 Months">3-6 Months</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-300 mb-1">Property / Neighborhood Interest</label>
+        <input name="propertyInterest" type="text" placeholder="e.g. The Mercer Penthouse / Tribeca Penthouses" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-emerald-400" />
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-slate-300 mb-1">Message or Viewing Request</label>
+        <textarea name="notes" rows="2" placeholder="I would love to schedule a private tour this week..." class="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white focus:outline-none focus:border-emerald-400"></textarea>
+      </div>
+      <button type="submit" id="submitBtn" class="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm transition-colors cursor-pointer">
+        Send Priority Inquiry
+      </button>
+      <div id="statusBox" class="hidden p-3 rounded-xl text-xs font-medium"></div>
+    </form>
+  </div>
+
+  <script>
+    const form = document.getElementById('leadForm');
+    const statusBox = document.getElementById('statusBox');
+    const submitBtn = document.getElementById('submitBtn');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitting to Brokerage CRM...';
+      const fd = new FormData(form);
+      const payload = {
+        name: fd.get('name'),
+        phone: fd.get('phone'),
+        email: fd.get('email'),
+        budget: fd.get('budget') || '$3,500,000',
+        timeline: fd.get('timeline') || 'Immediate',
+        propertyInterest: fd.get('propertyInterest') || 'Private Portfolio Inquiry',
+        notes: fd.get('notes') || 'Submitted via Hosted ${meta.label} Inquiry Link.',
+        source: '${meta.label}',
+        websiteDomain: '${acctHandle.replace(/'/g, '')}'
+      };
+      try {
+        const res = await fetch('/api/webhooks/website-leads', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        statusBox.className = 'p-3.5 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-xs font-medium block';
+        statusBox.textContent = '✅ Thank you! Your inquiry has been received in our CRM and a specialist will reach out shortly.';
+        form.reset();
+      } catch (err) {
+        statusBox.className = 'p-3.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-200 text-xs font-medium block';
+        statusBox.textContent = 'Could not submit inquiry. Please try again.';
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Send Priority Inquiry';
+      }
+    });
+  </script>
+</body>
+</html>`);
+  });
+
+  // 7. Outbound Channel Dispatch (Official APIs / Simple Direct 1-Click Mode / QR / Webhook)
   app.post('/api/channels/dispatch', async (req, res) => {
     const { channelId, recipient, messageBody, webhookUrl } = req.body;
 
@@ -2474,7 +3434,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
             return res.json({
               ok: true,
               mode: 'LIVE_TELNYX_API',
-              detail: `✅ Sent live Telnyx SMS to ${recipient} (Message ID: ${
+              detail: `✅ Sent live SMS via Official Telnyx API to ${recipient} (Message ID: ${
                 data?.data?.id || 'ok'
               })`,
             });
@@ -2482,7 +3442,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
           return res.status(400).json({
             ok: false,
             mode: 'TELNYX_ERROR',
-            detail: `❌ Telnyx API error: ${
+            detail: `❌ Official Telnyx API error: ${
               data?.errors?.[0]?.detail ||
               'Telnyx API rejected request. Check your Telnyx API Key & From Number.'
             }`,
@@ -2515,7 +3475,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
             return res.json({
               ok: true,
               mode: 'LIVE_WHATSAPP_API',
-              detail: `✅ Sent live WhatsApp message to ${recipient} (ID: ${
+              detail: `✅ Sent live WhatsApp message via Official Meta Cloud API to ${recipient} (ID: ${
                 data?.messages?.[0]?.id || 'sent'
               })`,
             });
@@ -2523,9 +3483,52 @@ ${JSON.stringify(reminderItems, null, 2)}`;
           return res.status(400).json({
             ok: false,
             mode: 'WHATSAPP_ERROR',
-            detail: `❌ WhatsApp Graph API error: ${
+            detail: `❌ Official Meta WhatsApp Cloud API error: ${
               data?.error?.message ||
               'WhatsApp Graph API rejected request. Check your token.'
+            }`,
+          });
+        }
+
+        const ultramsgInstance = getSecretPlain('ULTRAMSG_INSTANCE_ID');
+        const ultramsgToken = getSecretPlain('ULTRAMSG_TOKEN');
+        if (ultramsgInstance && ultramsgToken && recipient) {
+          const cleanInst = ultramsgInstance.replace(/^instance/i, '');
+          const instPath = `instance${cleanInst}`;
+          const ultraResp = await fetch(
+            `https://api.ultramsg.com/${encodeURIComponent(
+              instPath
+            )}/messages/chat`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                token: ultramsgToken,
+                to: recipient.replace(/[^0-9+]/g, ''),
+                body: messageBody,
+              }),
+            }
+          );
+          const ultraData = await ultraResp.json().catch(() => ({}));
+          if (ultraResp.ok && (ultraData?.sent === 'true' || ultraData?.id)) {
+            return res.json({
+              ok: true,
+              mode: 'LIVE_ULTRAMSG_QR',
+              detail: `✅ Sent live WhatsApp message via Ultramsg QR Gateway to ${recipient} (ID: ${
+                ultraData?.id || 'sent'
+              })`,
+            });
+          }
+          return res.status(400).json({
+            ok: false,
+            mode: 'ULTRAMSG_ERROR',
+            detail: `❌ Ultramsg QR WhatsApp error: ${
+              typeof ultraData?.error === 'string'
+                ? ultraData.error
+                : JSON.stringify(
+                    ultraData?.error ||
+                      'Check that your WhatsApp phone is online in Ultramsg.'
+                  )
             }`,
           });
         }
@@ -2559,7 +3562,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
       return res.status(400).json({
         ok: false,
         mode: 'NOT_CONFIGURED',
-        detail: `❌ ${channelId.toUpperCase()} is NOT connected. Open Connected Apps -> ${channelId} to verify your API key first.`,
+        detail: `❌ ${channelId.toUpperCase()} is NOT connected. Open Connected Apps -> ${channelId} to connect via Official API Key, Make.com/n8n/Zapier Outbound Webhook, or WhatsApp QR.`,
       });
     } catch (error: any) {
       return res.status(500).json({
@@ -2622,14 +3625,18 @@ ${JSON.stringify(reminderItems, null, 2)}`;
 
   function loadB2BPortalState(): B2BPortalState {
     const vault = loadVault() as any;
+    const connectedWa = (
+      vault.configs?.['whatsapp']?.accountHandle || ''
+    ).replace(/[^0-9+]/g, '');
+
     if (!vault.b2bPortal) {
       vault.b2bPortal = {
         masterAdminKey: 'ADMIN-ESTATE-2026',
         settings: {
           brandName: 'Atelier Estate AI',
           tagline: 'Autonomous 24/7 Real Estate AI Workforce & Omnichannel CRM',
-          whatsappNumber: '+15550192834',
-          calendlyUrl: 'https://calendly.com',
+          whatsappNumber: connectedWa || '',
+          calendlyUrl: '',
           notificationEmail:
             getSecretPlain('RESEND_FROM_EMAIL') ||
             getSecretPlain('BREVO_FROM_EMAIL') ||
@@ -2638,41 +3645,45 @@ ${JSON.stringify(reminderItems, null, 2)}`;
           backendUrl: '',
           requireLicenseLock: true,
         },
-        licenses: [
-          {
-            id: 'lic_demo_1',
-            agencyName: 'Vanguard Luxury Realty',
-            clientName: 'Alexander Sterling',
-            clientEmail: 'alex@vanguardrealty.com',
-            licenseKey: 'ESTATE-PRO-8842-VIP',
-            planTier: 'Enterprise',
-            billingCycle: 'Annual',
-            status: 'ACTIVE',
-            createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-            expiresAt: new Date(Date.now() + 86400000 * 360).toISOString(),
-            lastLoginAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-            notes: 'Paid on onboarding strategy call — 4 AI bots + Google Calendar sync enabled.',
-          },
-        ],
-        enquiries: [
-          {
-            id: 'enq_sample_1',
-            agencyName: 'Skyline Prime Properties',
-            contactName: 'Rohan Malhotra',
-            email: 'rohan@skylineprime.com',
-            phone: '+91 98201 44910',
-            teamSize: '11-25 Agents',
-            monthlyLeads: '300-800 Leads/mo',
-            message:
-              'We want to connect our Meta Ads, WhatsApp Business, and website lead capture to qualify buyers before passing to our 15 closing agents.',
-            source: 'Landing Page Strategy Form',
-            status: 'CALL_SCHEDULED',
-            emailAlertStatus: 'Logged in Admin Hub',
-            createdAt: new Date(Date.now() - 3600000 * 4).toISOString(),
-          },
-        ],
+        licenses: [],
+        enquiries: [],
       };
       saveVault(vault);
+    } else {
+      // Purge any legacy fake placeholder data from existing vault
+      let dirty = false;
+      if (vault.b2bPortal.settings?.whatsappNumber === '+15550192834') {
+        vault.b2bPortal.settings.whatsappNumber = connectedWa || '';
+        dirty = true;
+      } else if (!vault.b2bPortal.settings?.whatsappNumber && connectedWa) {
+        vault.b2bPortal.settings.whatsappNumber = connectedWa;
+        dirty = true;
+      }
+      if (vault.b2bPortal.settings?.calendlyUrl === 'https://calendly.com') {
+        vault.b2bPortal.settings.calendlyUrl = '';
+        dirty = true;
+      }
+      if (Array.isArray(vault.b2bPortal.licenses)) {
+        const filteredLic = vault.b2bPortal.licenses.filter(
+          (l: any) => l.id !== 'lic_demo_1'
+        );
+        if (filteredLic.length !== vault.b2bPortal.licenses.length) {
+          vault.b2bPortal.licenses = filteredLic;
+          dirty = true;
+        }
+      }
+      if (Array.isArray(vault.b2bPortal.enquiries)) {
+        const filteredEnq = vault.b2bPortal.enquiries.filter(
+          (e: any) => e.id !== 'enq_sample_1'
+        );
+        if (filteredEnq.length !== vault.b2bPortal.enquiries.length) {
+          vault.b2bPortal.enquiries = filteredEnq;
+          dirty = true;
+        }
+      }
+      if (dirty) {
+        saveVault(vault);
+      }
     }
     return vault.b2bPortal as B2BPortalState;
   }
@@ -2825,7 +3836,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
       getSecretPlain('RESEND_FROM_EMAIL') ||
       getSecretPlain('BREVO_FROM_EMAIL') ||
       getSecretPlain('GMAIL_SMTP_USER') ||
-      '';
+      'khushi4762@gmail.com';
 
     let emailResultDetail = 'Saved to Admin Enquiries Hub';
     if (ownerEmail) {
@@ -2852,7 +3863,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
       `We received your ${state.settings.brandName} Strategy Call Request`,
       `Hi ${newEnquiry.contactName},\n\n` +
         `Thank you for requesting a live strategy walkthrough of ${state.settings.brandName} for ${newEnquiry.agencyName}.\n\n` +
-        `Our engineering & onboarding specialist will connect with you on call/WhatsApp (${newEnquiry.phone}) shortly to walk you through the 4 AI Employees, connect your channels, and activate your dedicated Client License Key.\n\n` +
+        `Our engineering & onboarding specialist will connect with you on call/WhatsApp (${newEnquiry.phone}) shortly to walk you through the AI Employees, connect your channels, and activate your dedicated Client License Key.\n\n` +
         `Best regards,\n${state.settings.brandName} Team`
     );
 
@@ -2860,12 +3871,388 @@ ${JSON.stringify(reminderItems, null, 2)}`;
     state.enquiries = [newEnquiry, ...state.enquiries];
     saveB2BPortalState(state);
 
+    // Also push into inboundWebsiteLeads so it automatically syncs into Leads DB & Live Bot Logs
+    const syncedLead: InboundWebsiteLeadRecord = {
+      id: `enq-lead-${newEnquiry.id}`,
+      name: `${newEnquiry.contactName} (${newEnquiry.agencyName})`,
+      email: newEnquiry.email,
+      phone: newEnquiry.phone,
+      source: newEnquiry.source || 'Landing Page Enquiry',
+      budget: newEnquiry.monthlyLeads || 'B2B Agency',
+      timeline: 'Immediate',
+      propertyInterest: `${newEnquiry.agencyName} · ${newEnquiry.teamSize}`,
+      qualificationScore: 95,
+      status: 'AI Qualified',
+      assignedEmployeeId: 'elena',
+      notes: `Landing Page Enquiry: "${newEnquiry.message}" (${newEnquiry.teamSize}, ${newEnquiry.monthlyLeads})`,
+      websiteDomain: newEnquiry.source || 'Public Landing Page',
+      receivedAtIso: newEnquiry.createdAt,
+    };
+    inboundWebsiteLeads.unshift(syncedLead);
+
     res.json({
       ok: true,
       enquiry: newEnquiry,
+      lead: syncedLead,
       emailAlertStatus: emailResultDetail,
       whatsappNumber: state.settings.whatsappNumber,
       calendlyUrl: state.settings.calendlyUrl,
+      notificationEmail: ownerEmail,
+    });
+  });
+
+  // Real Built-In Strategy Call Slot Booking (No Fake Calendly Link Needed!)
+  app.post('/api/public/book-strategy-call', async (req, res) => {
+    const {
+      enquiryId,
+      agencyName,
+      contactName,
+      email,
+      phone,
+      dateStr,
+      timeSlot,
+    } = req.body || {};
+
+    if (!dateStr || !timeSlot) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Please select both a preferred date and time slot for your call.',
+      });
+    }
+
+    const state = loadB2BPortalState();
+    const slotLabel = `${dateStr} at ${timeSlot}`;
+
+    // Update the enquiry status to CALL_SCHEDULED and append the booked slot
+    state.enquiries = state.enquiries.map((e) =>
+      e.id === enquiryId || (email && e.email.toLowerCase() === String(email).toLowerCase())
+        ? {
+            ...e,
+            status: 'CALL_SCHEDULED',
+            message: `${e.message} | 📅 Booked Strategy Call: ${slotLabel}`,
+          }
+        : e
+    );
+    saveB2BPortalState(state);
+
+    const ownerEmail =
+      state.settings.notificationEmail ||
+      getSecretPlain('RESEND_FROM_EMAIL') ||
+      getSecretPlain('BREVO_FROM_EMAIL') ||
+      getSecretPlain('GMAIL_SMTP_USER') ||
+      'khushi4762@gmail.com';
+
+    await dispatchInternalEmailNotification(
+      ownerEmail,
+      `📅 Strategy Call Booked: ${agencyName || contactName} (${slotLabel})`,
+      `A real estate brokerage prospect just booked a Strategy Call slot on your Landing Page!\n\n` +
+        `Agency: ${agencyName || 'Brokerage'}\n` +
+        `Contact: ${contactName}\n` +
+        `Phone / WhatsApp: ${phone}\n` +
+        `Email: ${email}\n` +
+        `Booked Call Slot: ${slotLabel}\n\n` +
+        `Open your Admin: License Keys & Website Enquiries tab to view their details and issue their License Key after the call.`
+    );
+
+    if (email && String(email).includes('@')) {
+      await dispatchInternalEmailNotification(
+        String(email),
+        `Confirmed: Strategy Call for ${agencyName || contactName} (${slotLabel})`,
+        `Hi ${contactName || 'there'},\n\n` +
+          `Your onboarding & strategy call for ${state.settings.brandName} is confirmed for:\n` +
+          `📅 Date & Time: ${slotLabel}\n` +
+          `📞 Phone / WhatsApp we will reach you on: ${phone}\n\n` +
+          `During this call, we will walk you through the platform, help connect your channels, and issue your Client License Key.\n\n` +
+          `Best regards,\n${state.settings.brandName} Team (${ownerEmail})`
+      );
+    }
+
+    res.json({
+      ok: true,
+      slotLabel,
+      ownerEmail,
+      whatsappNumber: state.settings.whatsappNumber,
+    });
+  });
+
+  // Backend Workspace State Persistence (AI Employees, Human Agents, Properties, Leads, Reminders)
+  app.get('/api/brokerage/workspace', (_req, res) => {
+    const vault = loadVault() as any;
+    res.json({
+      ok: true,
+      workspace: vault.brokerageWorkspace || null,
+    });
+  });
+
+  app.post('/api/brokerage/workspace', (req, res) => {
+    const { employees, humanAgents, properties, leads, reminders, scheduledMeetings } =
+      req.body || {};
+    const vault = loadVault() as any;
+    vault.brokerageWorkspace = {
+      ...(vault.brokerageWorkspace || {}),
+      ...(Array.isArray(employees) ? { employees } : {}),
+      ...(Array.isArray(humanAgents) ? { humanAgents } : {}),
+      ...(Array.isArray(properties) ? { properties } : {}),
+      ...(Array.isArray(leads) ? { leads } : {}),
+      ...(Array.isArray(reminders) ? { reminders } : {}),
+      ...(Array.isArray(scheduledMeetings) ? { scheduledMeetings } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    saveVault(vault);
+    res.json({
+      ok: true,
+      updatedAt: vault.brokerageWorkspace.updatedAt,
+    });
+  });
+
+  function signSessionToken(payload: Record<string, any>): string {
+    const dataStr = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const sig = crypto
+      .createHmac('sha256', VAULT_SECRET)
+      .update(dataStr)
+      .digest('base64url');
+    return `${dataStr}.${sig}`;
+  }
+
+  function verifySessionToken(token: string): Record<string, any> | null {
+    if (!token || !token.includes('.')) return null;
+    const [dataStr, sig] = token.split('.');
+    const expected = crypto
+      .createHmac('sha256', VAULT_SECRET)
+      .update(dataStr)
+      .digest('base64url');
+    if (sig !== expected) return null;
+    try {
+      return JSON.parse(Buffer.from(dataStr, 'base64url').toString('utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  function buildIcsCalendarInvite(params: {
+    uid: string;
+    summary: string;
+    description: string;
+    location: string;
+    startIso: string;
+    endIso: string;
+    organizerName: string;
+    organizerEmail: string;
+    agentName: string;
+    agentEmail: string;
+    leadName: string;
+    leadEmail: string;
+  }): string {
+    const toIcsDate = (iso: string) =>
+      new Date(iso)
+        .toISOString()
+        .replace(/[-:]/g, '')
+        .replace(/\.\d{3}/, '');
+    const nowStamp = toIcsDate(new Date().toISOString());
+    const startStamp = toIcsDate(params.startIso);
+    const endStamp = toIcsDate(params.endIso);
+    const cleanDesc = (params.description || '')
+      .replace(/\r?\n/g, '\\n')
+      .replace(/,/g, '\\,');
+
+    return [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Atelier Estate Brokerage OS//EN',
+      'CALSCALE:GREGORIAN',
+      'METHOD:REQUEST',
+      'BEGIN:VEVENT',
+      `UID:${params.uid}`,
+      `DTSTAMP:${nowStamp}`,
+      `DTSTART:${startStamp}`,
+      `DTEND:${endStamp}`,
+      `SUMMARY:${params.summary}`,
+      `DESCRIPTION:${cleanDesc}`,
+      `LOCATION:${params.location}`,
+      `ORGANIZER;CN="${params.organizerName}":mailto:${params.organizerEmail}`,
+      ...(params.agentEmail
+        ? [
+            `ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN="${params.agentName}":mailto:${params.agentEmail}`,
+          ]
+        : []),
+      ...(params.leadEmail
+        ? [
+            `ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN="${params.leadName}":mailto:${params.leadEmail}`,
+          ]
+        : []),
+      'STATUS:CONFIRMED',
+      'SEQUENCE:0',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  // Owner-Centric Human Agent Showing & Calendar Invite Dispatcher (No Employee Login Needed!)
+  app.post('/api/calendar/book-agent-meeting', async (req, res) => {
+    const {
+      title,
+      description,
+      propertyTitle,
+      startIso,
+      endIso,
+      durationMinutes,
+      agentId,
+      agentName,
+      agentEmail,
+      agentPhone,
+      agentBookingUrl,
+      leadId,
+      leadName,
+      leadEmail,
+    } = req.body || {};
+
+    if (!startIso || !agentName) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Meeting start time and assigned human agent are required.',
+      });
+    }
+
+    const computedEndIso =
+      endIso ||
+      new Date(
+        new Date(startIso).getTime() + (Number(durationMinutes) || 45) * 60000
+      ).toISOString();
+
+    const uid = `showing-${Date.now()}@atelierestate.ai`;
+    const organizerEmail =
+      getSecretPlain('RESEND_FROM_EMAIL') ||
+      getSecretPlain('BREVO_FROM_EMAIL') ||
+      getSecretPlain('GMAIL_SMTP_USER') ||
+      'bookings@atelierestate.ai';
+
+    const icsContent = buildIcsCalendarInvite({
+      uid,
+      summary: title || `Property Showing: ${propertyTitle || 'Luxury Listing'}`,
+      description:
+        description ||
+        `Assigned Agent: ${agentName} (${agentEmail || ''})\nBuyer: ${
+          leadName || ''
+        } (${leadEmail || ''})`,
+      location: propertyTitle || 'Brokerage Property Showing',
+      startIso,
+      endIso: computedEndIso,
+      organizerName: 'Atelier Estate Booking Desk',
+      organizerEmail,
+      agentName: agentName || 'Assigned Agent',
+      agentEmail: agentEmail || '',
+      leadName: leadName || 'Valued Buyer',
+      leadEmail: leadEmail || '',
+    });
+
+    const formattedSlot = new Date(startIso).toLocaleString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    // Generate universal 1-click "Add to Google Calendar" URL for both the Human Agent & Buyer
+    const toGCalDates = (s: string, e: string) => {
+      const fmt = (iso: string) =>
+        new Date(iso)
+          .toISOString()
+          .replace(/[-:]/g, '')
+          .replace(/\.\d{3}/, '');
+      return `${fmt(s)}/${fmt(e)}`;
+    };
+    const gcalTemplateLink = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(
+      title || `Property Showing: ${propertyTitle}`
+    )}&dates=${toGCalDates(startIso, computedEndIso)}&details=${encodeURIComponent(
+      `${description || ''}\nAssigned Agent: ${agentName} (${agentEmail})\nBuyer: ${leadName} (${leadEmail})`
+    )}&location=${encodeURIComponent(propertyTitle || '')}`;
+
+    const dispatchedTo: string[] = [];
+
+    // 1. Send Calendar Assignment & .ics Invite to the Human Agent's Email (Owner doesn't need employee login!)
+    if (agentEmail && agentEmail.includes('@')) {
+      const agentMailRes = await dispatchInternalEmailNotification(
+        agentEmail,
+        `📅 New Showing Assigned to You: ${
+          propertyTitle || title
+        } (${formattedSlot})`,
+        `Hi ${agentName},\n\n` +
+          `The brokerage desk has assigned a confirmed property showing to you:\n\n` +
+          `• Property: ${propertyTitle || title}\n` +
+          `• Date & Time: ${formattedSlot} (${durationMinutes || 45} mins)\n` +
+          `• Buyer / Client: ${leadName || 'Client'} (${leadEmail || 'N/A'})\n` +
+          `• Briefing Notes: ${description || 'Qualified buyer tour.'}\n\n` +
+          `👉 Click here to add this showing to your Google/Phone Calendar in 1 click:\n${gcalTemplateLink}\n\n` +
+          (agentBookingUrl
+            ? `Your Booking Link on file: ${agentBookingUrl}\n\n`
+            : '') +
+          `— Atelier Estate Brokerage Desk`
+      );
+      if (agentMailRes.ok) {
+        dispatchedTo.push(`Agent Email (${agentEmail})`);
+      }
+    }
+
+    // 2. Send Calendar Confirmation to the Buyer Lead's Email
+    if (leadEmail && leadEmail.includes('@')) {
+      const buyerMailRes = await dispatchInternalEmailNotification(
+        leadEmail,
+        `📅 Confirmed Property Viewing: ${
+          propertyTitle || title
+        } with ${agentName}`,
+        `Hi ${leadName || 'there'},\n\n` +
+          `Your private property viewing has been scheduled:\n\n` +
+          `• Property: ${propertyTitle || title}\n` +
+          `• Date & Time: ${formattedSlot} (${durationMinutes || 45} mins)\n` +
+          `• Your Senior Agent: ${agentName} (${agentEmail || ''}${
+            agentPhone ? ` · ${agentPhone}` : ''
+          })\n\n` +
+          `👉 Add this viewing to your Calendar:\n${gcalTemplateLink}\n\n` +
+          `Best regards,\nAtelier Estate`
+      );
+      if (buyerMailRes.ok) {
+        dispatchedTo.push(`Buyer Email (${leadEmail})`);
+      }
+    }
+
+    const meetingRecord = {
+      id: `mtg-${Date.now()}`,
+      title: title || `Showing: ${propertyTitle}`,
+      startIso,
+      endIso: computedEndIso,
+      durationMinutes: Number(durationMinutes) || 45,
+      agentId: agentId || 'agent-1',
+      agentName,
+      agentEmail: agentEmail || '',
+      calendarId: agentEmail || 'brokerage-master',
+      leadId,
+      leadName: leadName || 'Buyer',
+      leadEmail: leadEmail || '',
+      propertyTitle: propertyTitle || 'Luxury Listing',
+      source:
+        dispatchedTo.length > 0
+          ? `Dispatched Invite (${dispatchedTo.join(' & ')})`
+          : 'Brokerage Master Schedule',
+      htmlLink: gcalTemplateLink,
+      icsContent,
+    };
+
+    const vault = loadVault() as any;
+    vault.scheduledMeetings = [
+      meetingRecord,
+      ...(Array.isArray(vault.scheduledMeetings) ? vault.scheduledMeetings : []),
+    ];
+    saveVault(vault);
+
+    return res.json({
+      ok: true,
+      meeting: meetingRecord,
+      htmlLink: gcalTemplateLink,
+      dispatchedSummary:
+        dispatchedTo.length > 0
+          ? `Calendar invite emailed directly to ${dispatchedTo.join(' & ')}`
+          : 'Logged on Brokerage Master Schedule & generated 1-click Calendar Invite link (Connect Resend or Brevo in Email settings to auto-email invites to agents)',
     });
   });
 
@@ -2879,7 +4266,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
     if (!cleanKey) {
       return res.status(400).json({
         ok: false,
-        error: 'Please enter a valid License Key or Master Admin Key.',
+        error: 'Please enter your License Key or Admin Access Key.',
       });
     }
 
@@ -2887,17 +4274,20 @@ ${JSON.stringify(reminderItems, null, 2)}`;
 
     // 1. Check Master Admin Key
     if (cleanKey === state.masterAdminKey) {
+      const sessionPayload = {
+        role: 'ADMIN' as const,
+        agencyName: `${state.settings.brandName} (Admin)`,
+        clientName: 'Brokerage Owner',
+        clientEmail: cleanEmail || state.settings.notificationEmail,
+        licenseKey: cleanKey,
+        planTier: 'Enterprise',
+        issuedAt: Date.now(),
+      };
       return res.json({
         ok: true,
         role: 'ADMIN',
-        session: {
-          role: 'ADMIN',
-          agencyName: `${state.settings.brandName} (Master Admin)`,
-          clientName: 'System Owner / Admin',
-          clientEmail: cleanEmail || state.settings.notificationEmail,
-          licenseKey: cleanKey,
-          planTier: 'Enterprise',
-        },
+        token: signSessionToken(sessionPayload),
+        session: sessionPayload,
       });
     }
 
@@ -2910,7 +4300,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
       return res.status(401).json({
         ok: false,
         error:
-          'Invalid License Key. Please book a discovery call and complete payment to receive your activation key.',
+          'Invalid License Key. Book a strategy call and complete payment to receive your activation key.',
       });
     }
 
@@ -2918,7 +4308,17 @@ ${JSON.stringify(reminderItems, null, 2)}`;
       return res.status(403).json({
         ok: false,
         error:
-          'This License Key is currently SUSPENDED. Please contact billing support to reactivate your automation.',
+          'This License Key has been suspended by the administrator. Please contact support.',
+      });
+    }
+
+    if (
+      matched.expiresAt &&
+      new Date(matched.expiresAt).getTime() < Date.now()
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error: 'This License Key has expired. Please renew your subscription.',
       });
     }
 
@@ -2929,25 +4329,52 @@ ${JSON.stringify(reminderItems, null, 2)}`;
     ) {
       return res.status(401).json({
         ok: false,
-        error: `This License Key is registered to a different agency email address.`,
+        error:
+          'This License Key is bound to a different registered agency email address.',
       });
     }
 
     matched.lastLoginAt = new Date().toISOString();
     saveB2BPortalState(state);
 
+    const sessionPayload = {
+      role: 'CLIENT' as const,
+      agencyName: matched.agencyName,
+      clientName: matched.clientName,
+      clientEmail: matched.clientEmail,
+      licenseKey: matched.licenseKey,
+      planTier: matched.planTier,
+      issuedAt: Date.now(),
+    };
+
     return res.json({
       ok: true,
       role: 'CLIENT',
-      session: {
-        role: 'CLIENT',
-        agencyName: matched.agencyName,
-        clientName: matched.clientName,
-        clientEmail: matched.clientEmail,
-        licenseKey: matched.licenseKey,
-        planTier: matched.planTier,
-      },
+      token: signSessionToken(sessionPayload),
+      session: sessionPayload,
     });
+  });
+
+  app.post('/api/auth/verify-session', (req, res) => {
+    const { token } = req.body || {};
+    const payload = verifySessionToken(String(token || ''));
+    if (!payload) {
+      return res.status(401).json({ ok: false, error: 'Invalid session token' });
+    }
+    const state = loadB2BPortalState();
+    if (payload.role === 'ADMIN') {
+      if (payload.licenseKey !== state.masterAdminKey) {
+        return res.status(401).json({ ok: false, error: 'Admin key changed' });
+      }
+      return res.json({ ok: true, session: payload });
+    }
+    const matched = state.licenses.find(
+      (l) => l.licenseKey.toUpperCase() === String(payload.licenseKey || '').toUpperCase()
+    );
+    if (!matched || matched.status !== 'ACTIVE') {
+      return res.status(403).json({ ok: false, error: 'License suspended or revoked' });
+    }
+    return res.json({ ok: true, session: payload });
   });
 
   app.get('/api/admin/portal-data', (_req, res) => {
@@ -3000,7 +4427,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
       });
     }
 
-    const randomPart1 = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const randomHex = crypto.randomBytes(4).toString('hex').toUpperCase();
     const randomPart2 = Math.floor(1000 + Math.random() * 9000);
     const tierPrefix =
       planTier === 'Enterprise'
@@ -3008,7 +4435,7 @@ ${JSON.stringify(reminderItems, null, 2)}`;
         : planTier === 'Starter'
         ? 'STR'
         : 'PRO';
-    const generatedKey = `ESTATE-${tierPrefix}-${randomPart2}-${randomPart1}`;
+    const generatedKey = `ESTATE-${tierPrefix}-${randomPart2}-${randomHex}`;
 
     const daysValid =
       billingCycle === 'Lifetime'
@@ -3052,17 +4479,17 @@ ${JSON.stringify(reminderItems, null, 2)}`;
     if (sendEmailToClient !== false && newLicense.clientEmail.includes('@')) {
       const dispatchRes = await dispatchInternalEmailNotification(
         newLicense.clientEmail,
-        `🎉 Your ${state.settings.brandName} License Key & Portal Access (${newLicense.agencyName})`,
+        `Your ${state.settings.brandName} License Key & Portal Access (${newLicense.agencyName})`,
         `Welcome to ${state.settings.brandName}, ${newLicense.clientName}!\n\n` +
           `Your payment and onboarding setup for ${newLicense.agencyName} (${newLicense.planTier} - ${newLicense.billingCycle}) have been verified.\n\n` +
           `=========================================\n` +
           `CLIENT EMAIL: ${newLicense.clientEmail}\n` +
           `LICENSE KEY:  ${newLicense.licenseKey}\n` +
           `=========================================\n\n` +
-          `How to Unlock Your AI Workforce:\n` +
-          `1. Open the portal and click "Client Portal Login (Unlock System)".\n` +
+          `How to Sign In:\n` +
+          `1. Open the portal and click "Client Sign In".\n` +
           `2. Enter your Client Email and License Key above.\n` +
-          `3. Connect your WhatsApp, Instagram, Website Webhook, and Google Calendar.\n\n` +
+          `3. Connect your email, website webhook, and add your human agents' contact details.\n\n` +
           `Welcome aboard,\n${state.settings.brandName} Team`
       );
       emailDeliveryNote = dispatchRes.detail;
@@ -3114,11 +4541,18 @@ ${JSON.stringify(reminderItems, null, 2)}`;
   });
 
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
+    const vitePromise = createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
-    app.use(vite.middlewares);
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await vitePromise;
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));

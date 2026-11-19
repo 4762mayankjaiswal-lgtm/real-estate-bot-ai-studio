@@ -66,12 +66,13 @@ export const AdminLicenseEnquiriesView: React.FC<
   >('enquiries');
   const [loading, setLoading] = useState(true);
 
-  const [masterAdminKey, setMasterAdminKey] = useState('ADMIN-ESTATE-2026');
+  const [masterAdminKey, setMasterAdminKey] = useState('');
+  const [showMasterKey, setShowMasterKey] = useState(false);
   const [settings, setSettings] = useState({
     brandName: 'Atelier Estate AI',
     tagline: 'Autonomous 24/7 Real Estate AI Workforce & Omnichannel CRM',
-    whatsappNumber: '+15550192834',
-    calendlyUrl: 'https://calendly.com',
+    whatsappNumber: '',
+    calendlyUrl: '',
     notificationEmail: 'khushi4762@gmail.com',
     backendUrl: window.location.origin,
     requireLicenseLock: true,
@@ -106,7 +107,7 @@ export const AdminLicenseEnquiriesView: React.FC<
       const resp = await fetch('/api/admin/portal-data');
       const data = await resp.json();
       if (data.ok) {
-        setMasterAdminKey(data.masterAdminKey || 'ADMIN-ESTATE-2026');
+        setMasterAdminKey(data.masterAdminKey || '');
         setSettings({
           ...settings,
           ...data.settings,
@@ -747,13 +748,23 @@ export const AdminLicenseEnquiriesView: React.FC<
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1">
-                    Master Admin Unlock Key
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
+                      Master Admin Unlock Key
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowMasterKey((prev) => !prev)}
+                      className="text-[10px] font-semibold text-amber-400 hover:underline cursor-pointer"
+                    >
+                      {showMasterKey ? 'Hide' : 'Reveal'}
+                    </button>
+                  </div>
                   <input
-                    type="text"
+                    type={showMasterKey ? 'text' : 'password'}
                     value={masterAdminKey}
                     onChange={(e) => setMasterAdminKey(e.target.value)}
+                    autoComplete="off"
                     className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-amber-300"
                   />
                 </div>

@@ -176,6 +176,8 @@ export interface ProposedToolAction {
   propertyStatus?: string;
   executed?: boolean;
   executionResult?: string;
+  directLaunchUrl?: string;
+  dispatchMode?: string;
   mapsPlaces?: { title: string; uri: string }[];
 }
 

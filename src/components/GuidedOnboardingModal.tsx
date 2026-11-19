@@ -24,6 +24,9 @@ import {
   Check,
   PlusCircle,
   Layers,
+  Activity,
+  ExternalLink,
+  BookOpen,
 } from 'lucide-react';
 import {
   ToolConnection,
@@ -31,6 +34,8 @@ import {
   ConnectedAppAccount,
 } from '../types/brokerage';
 import { sendGmailMessage } from '../services/googleWorkspace';
+import { WebhookHealthVisualizer } from './WebhookHealthVisualizer';
+import { AutomationBlueprintGuide } from './AutomationBlueprintGuide';
 
 export type LlmProviderId =
   | 'openai'
@@ -129,7 +134,11 @@ export const LLM_PROVIDER_CATALOG: {
 interface GuidedOnboardingModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialChannel?: ToolId | 'llm_engine';
+  initialChannel?:
+    | ToolId
+    | 'llm_engine'
+    | 'webhook_health'
+    | 'step_by_step_guide';
   tools: ToolConnection[];
   googleAccountEmail: string | null;
   googleAccessToken: string | null;
@@ -336,9 +345,9 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
   onManageChannelAccounts,
   onWebsiteLeadReceived,
 }) => {
-  const [selectedId, setSelectedId] = useState<ToolId | 'llm_engine'>(
-    initialChannel
-  );
+  const [selectedId, setSelectedId] = useState<
+    ToolId | 'llm_engine' | 'webhook_health' | 'step_by_step_guide'
+  >(initialChannel);
 
   // BYOK LLM State
   const [providerChoice, setProviderChoice] = useState<LlmProviderId>(
@@ -390,6 +399,9 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
   // Website Lead Live Test State
   const [copiedWebhook, setCopiedWebhook] = useState(false);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
+  const [connectionModeTab, setConnectionModeTab] = useState<
+    'official_api' | 'templates_guide'
+  >('official_api');
   const [testLeadName, setTestLeadName] = useState('Julianna Sterling-Vance');
   const [testLeadEmail, setTestLeadEmail] = useState(
     'j.sterling@pacificfamilyoffice.com'
@@ -655,7 +667,12 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
 
   const handleSaveChannel = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (selectedId === 'llm_engine') return;
+    if (
+      selectedId === 'llm_engine' ||
+      selectedId === 'webhook_health' ||
+      selectedId === 'step_by_step_guide'
+    )
+      return;
     setSaving(true);
     setFeedback(null);
     try {
@@ -683,7 +700,12 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
   };
 
   const handleClearChannel = async () => {
-    if (selectedId === 'llm_engine') return;
+    if (
+      selectedId === 'llm_engine' ||
+      selectedId === 'webhook_health' ||
+      selectedId === 'step_by_step_guide'
+    )
+      return;
     setSaving(true);
     setFeedback(null);
     try {
@@ -708,7 +730,12 @@ export const GuidedOnboardingModal: React.FC<GuidedOnboardingModalProps> = ({
     action: 'set_primary' | 'remove_account',
     accountId: string
   ) => {
-    if (selectedId === 'llm_engine') return;
+    if (
+      selectedId === 'llm_engine' ||
+      selectedId === 'webhook_health' ||
+      selectedId === 'step_by_step_guide'
+    )
+      return;
     setSaving(true);
     setFeedback(null);
     try {
@@ -978,11 +1005,131 @@ async function sendLeadToAtelierCRM(formData) {
                 </button>
               );
             })}
+            <div className="px-2.5 pt-4 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              3. Ready-Made Templates & Guide
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedId('step_by_step_guide')}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-all cursor-pointer ${
+                selectedId === 'step_by_step_guide'
+                  ? 'bg-indigo-950 text-white shadow-xs border border-indigo-700'
+                  : 'bg-indigo-50/80 text-indigo-950 hover:bg-indigo-100 border border-indigo-200'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 truncate">
+                <BookOpen
+                  className={`w-4 h-4 shrink-0 ${
+                    selectedId === 'step_by_step_guide'
+                      ? 'text-indigo-300'
+                      : 'text-indigo-700'
+                  }`}
+                />
+                <div className="truncate">
+                  <div className="font-bold truncate">
+                    Step-by-Step & Templates
+                  </div>
+                  <div
+                    className={`text-[10px] truncate ${
+                      selectedId === 'step_by_step_guide'
+                        ? 'text-indigo-200'
+                        : 'text-indigo-800'
+                    }`}
+                  >
+                    Make / n8n / Zapier / API
+                  </div>
+                </div>
+              </div>
+              <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white text-[9px] font-bold shrink-0">
+                JSON
+              </span>
+            </button>
+
+            <div className="px-2.5 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              4. Webhook Health & Sync Diagnostics
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedId('webhook_health')}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-xs font-medium transition-all cursor-pointer ${
+                selectedId === 'webhook_health'
+                  ? 'bg-emerald-950 text-white shadow-xs border border-emerald-700'
+                  : 'bg-emerald-50/70 text-emerald-950 hover:bg-emerald-100/80 border border-emerald-200'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 truncate">
+                <Activity
+                  className={`w-4 h-4 shrink-0 ${
+                    selectedId === 'webhook_health'
+                      ? 'text-emerald-400'
+                      : 'text-emerald-700'
+                  }`}
+                />
+                <div className="truncate">
+                  <div className="font-bold truncate">Webhook Health</div>
+                  <div
+                    className={`text-[10px] truncate ${
+                      selectedId === 'webhook_health'
+                        ? 'text-emerald-300'
+                        : 'text-emerald-800'
+                    }`}
+                  >
+                    Timestamps, Errors & Paths
+                  </div>
+                </div>
+              </div>
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+            </button>
           </div>
 
           {/* Right Form Content */}
           <div className="flex-1 p-6 overflow-y-auto bg-white">
-            {selectedId === 'llm_engine' ? (
+            {selectedId === 'step_by_step_guide' ? (
+              <AutomationBlueprintGuide
+                channelId="whatsapp"
+                accountHandle={accountHandle}
+                webhookUrl={webhookUrl}
+                onChangeAccountHandle={setAccountHandle}
+                onChangeWebhookUrl={setWebhookUrl}
+                onSaveWebhookConnection={async (targetChannelId) => {
+                  setSaving(true);
+                  setFeedback(null);
+                  try {
+                    const res = await onSaveChannelConfig(
+                      targetChannelId || 'whatsapp',
+                      {
+                        accountHandle: accountHandle.trim(),
+                        webhookUrl: webhookUrl.trim(),
+                        secrets: {},
+                      }
+                    );
+                    await refreshVaultStatus();
+                    setFeedback({
+                      type: 'success',
+                      text:
+                        res?.verificationMessage ||
+                        '✅ Verified Outbound Webhook live!',
+                    });
+                  } catch (err: any) {
+                    setFeedback({
+                      type: 'error',
+                      text: err?.message || 'Webhook verification failed.',
+                    });
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                onOpenWebhookHealth={() => setSelectedId('webhook_health')}
+                onWebsiteLeadReceived={onWebsiteLeadReceived}
+                saving={saving}
+                feedback={feedback}
+                fullPageMode={true}
+              />
+            ) : selectedId === 'webhook_health' ? (
+              <WebhookHealthVisualizer
+                onWebsiteLeadReceived={onWebsiteLeadReceived}
+              />
+            ) : selectedId === 'llm_engine' ? (
               <form onSubmit={handleSaveLlmKey} className="space-y-5">
                 <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-200">
                   <div>
@@ -1250,6 +1397,18 @@ async function sendLeadToAtelierCRM(formData) {
                   {activeDef.simpleHint}
                 </div>
 
+                {/* Inline Compact Webhook Health & Sync Diagnostic Card for Webhook-Capable Channels */}
+                {['website_leads', 'whatsapp', 'instagram', 'facebook', 'telnyx'].includes(
+                  selectedId
+                ) && (
+                  <WebhookHealthVisualizer
+                    compact
+                    focusChannelId={selectedId}
+                    onOpenFullVisualizer={() => setSelectedId('webhook_health')}
+                    onWebsiteLeadReceived={onWebsiteLeadReceived}
+                  />
+                )}
+
                 {/* ============================================================
                     MULTI-ACCOUNT MANAGER: CONNECTED ACCOUNTS LIST FOR THIS APP
                     ============================================================ */}
@@ -1492,6 +1651,55 @@ async function sendLeadToAtelierCRM(formData) {
 
                 {activeDef.type === 'google_oauth' && (
                   <div className="mt-5 space-y-4">
+                    {selectedId === 'google_calendar' && (
+                      <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50/60 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-bold text-emerald-950">
+                              Recommended for Brokerage Owners — Direct .ics Calendar Invite Dispatch (No Employee Login Required)
+                            </div>
+                            <p className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
+                              You don't need your human agents' personal Gmail passwords or OAuth logins. Activate the Brokerage Master Schedule below: whenever a showing is booked, the system checks for conflicts and emails a 1-click Calendar Invite (.ics) directly to the assigned Human Agent's email and the Buyer's email via Resend / Brevo / SMTP.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={async () => {
+                              setSaving(true);
+                              setFeedback(null);
+                              try {
+                                await onSaveChannelConfig('google_calendar', {
+                                  accountHandle:
+                                    googleAccountEmail ||
+                                    'Brokerage Master Schedule (.ics Invites)',
+                                  webhookUrl: '',
+                                  secrets: {},
+                                });
+                                await refreshVaultStatus();
+                                setFeedback({
+                                  type: 'success',
+                                  text: '✅ Activated Brokerage Master Schedule & Direct .ics Calendar Invite Dispatcher for all Human Agents!',
+                                });
+                              } catch (err: any) {
+                                setFeedback({
+                                  type: 'error',
+                                  text:
+                                    err?.message ||
+                                    'Failed to activate calendar dispatcher.',
+                                });
+                              } finally {
+                                setSaving(false);
+                              }
+                            }}
+                            className="px-4 py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold shrink-0 transition-colors cursor-pointer"
+                          >
+                            Activate Direct .ics Invite Mode
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Option 1: Real Google OAuth 2.0 Popup */}
                     <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-3">
                       <div className="flex items-center justify-between">
@@ -2044,114 +2252,528 @@ async function sendLeadToAtelierCRM(formData) {
                 )}
 
                 {activeDef.type === 'api_key' && (
-                  <form onSubmit={handleSaveChannel} className="mt-5 space-y-4">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-700 mb-1">
-                        {activeDef.handleLabel ||
-                          'Account Handle / Phone Number'}
-                      </label>
-                      <input
-                        type="text"
-                        value={accountHandle}
-                        onChange={(e) => setAccountHandle(e.target.value)}
-                        placeholder={activeDef.handlePlaceholder || ''}
-                        className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
-                      />
-                    </div>
-
-                    {activeDef.secretFields.map((field) => {
-                      const status = vaultStatus[field.keyName];
-                      return (
-                        <div key={field.keyName}>
-                          <div className="flex items-center justify-between mb-1">
-                            <label className="text-xs font-medium text-slate-700">
-                              {field.label}
-                            </label>
-                            {status?.configured ? (
-                              <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                                Verified: {status.masked}
-                              </span>
-                            ) : (
-                              <span className="text-[11px] text-slate-400">
-                                Blank (Not Set)
-                              </span>
-                            )}
-                          </div>
+                  <div className="mt-5 space-y-5">
+                    {selectedId === 'website_leads' ? (
+                      <form
+                        onSubmit={handleSaveChannel}
+                        className="p-4 rounded-2xl border border-slate-200 bg-slate-50/50 space-y-4"
+                      >
+                        <div>
+                          <label className="block text-xs font-medium text-slate-700 mb-1">
+                            {activeDef.handleLabel || 'Agency Website Domain'}
+                          </label>
                           <input
-                            type="password"
-                            value={secretInputs[field.keyName] || ''}
-                            onChange={(e) =>
-                              setSecretInputs((prev) => ({
-                                ...prev,
-                                [field.keyName]: e.target.value,
-                              }))
-                            }
-                            placeholder={
-                              status?.configured
-                                ? `Saved (${status.masked}) — paste new key to add/switch account`
-                                : field.placeholder
-                            }
-                            className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-lg font-mono focus:outline-none focus:border-slate-900"
+                            type="text"
+                            value={accountHandle}
+                            onChange={(e) => setAccountHandle(e.target.value)}
+                            placeholder={activeDef.handlePlaceholder || ''}
+                            className="w-full px-3.5 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
                           />
                         </div>
-                      );
-                    })}
 
-                    {activeDef.webhookPlaceholder && (
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Outbound Webhook URL (Optional — Verified via live POST ping)
-                        </label>
-                        <input
-                          type="url"
-                          value={webhookUrl}
-                          onChange={(e) => setWebhookUrl(e.target.value)}
-                          placeholder={activeDef.webhookPlaceholder}
-                          className="w-full px-3.5 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:border-slate-900"
-                        />
-                      </div>
-                    )}
+                        {activeDef.secretFields.map((field) => {
+                          const status = vaultStatus[field.keyName];
+                          return (
+                            <div key={field.keyName}>
+                              <div className="flex items-center justify-between mb-1">
+                                <label className="text-xs font-medium text-slate-700">
+                                  {field.label}
+                                </label>
+                                {status?.configured && (
+                                  <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                                    Verified: {status.masked}
+                                  </span>
+                                )}
+                              </div>
+                              <input
+                                type="password"
+                                value={secretInputs[field.keyName] || ''}
+                                onChange={(e) =>
+                                  setSecretInputs((prev) => ({
+                                    ...prev,
+                                    [field.keyName]: e.target.value,
+                                  }))
+                                }
+                                placeholder={field.placeholder}
+                                className="w-full px-3.5 py-2 text-xs bg-white border border-slate-300 rounded-lg font-mono focus:outline-none focus:border-slate-900"
+                              />
+                            </div>
+                          );
+                        })}
 
-                    {feedback && (
-                      <div
-                        className={`p-3 rounded-lg border text-xs flex items-center gap-2 ${
-                          feedback.type === 'success'
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                            : 'bg-rose-50 border-rose-200 text-rose-800'
-                        }`}
-                      >
-                        {feedback.type === 'success' ? (
-                          <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                        ) : (
-                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                        {feedback && (
+                          <div
+                            className={`p-3 rounded-lg border text-xs flex items-center gap-2 ${
+                              feedback.type === 'success'
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                : 'bg-rose-50 border-rose-200 text-rose-800'
+                            }`}
+                          >
+                            {feedback.type === 'success' ? (
+                              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                            ) : (
+                              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                            )}
+                            <span>{feedback.text}</span>
+                          </div>
                         )}
-                        <span>{feedback.text}</span>
-                      </div>
-                    )}
 
-                    <div className="flex items-center justify-between pt-2">
-                      <button
-                        type="button"
-                        onClick={handleClearChannel}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium text-rose-600 hover:bg-rose-50 transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" /> Disconnect All
-                      </button>
+                        <div className="flex items-center justify-between pt-2">
+                          <button
+                            type="button"
+                            onClick={handleClearChannel}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium text-rose-600 hover:bg-rose-50 transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Disconnect All
+                          </button>
 
-                      <button
-                        type="submit"
-                        disabled={saving}
-                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
-                      >
-                        {saving && (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <button
+                            type="submit"
+                            disabled={saving}
+                            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
+                          >
+                            {saving && (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            )}
+                            Save Website Domain & Connect
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <>
+                        {/* 2-TAB 100% AUTOMATED CONNECTION METHOD SELECTOR */}
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                            Choose Your 100% Automated Connection Method for{' '}
+                            {activeDef.name.split(' (')[0]}:
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setConnectionModeTab('official_api');
+                                setFeedback(null);
+                              }}
+                              className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                connectionModeTab === 'official_api'
+                                  ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                                  : 'bg-white text-slate-800 border-slate-200 hover:bg-slate-50'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="text-xs font-bold">
+                                  1. Official Direct API Method
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${
+                                    connectionModeTab === 'official_api'
+                                      ? 'bg-emerald-500/20 text-emerald-300'
+                                      : 'bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  Direct Cloud API
+                                </span>
+                              </div>
+                              <p
+                                className={`text-[11px] mt-1 leading-snug ${
+                                  connectionModeTab === 'official_api'
+                                    ? 'text-slate-300'
+                                    : 'text-slate-500'
+                                }`}
+                              >
+                                {selectedId === 'whatsapp'
+                                  ? 'Official Meta WhatsApp Cloud API (Access Token + Phone Number ID)'
+                                  : selectedId === 'instagram'
+                                  ? 'Official Meta Instagram Graph API (Access Token)'
+                                  : selectedId === 'facebook'
+                                  ? 'Official Facebook Page Graph API (Page Access Token)'
+                                  : selectedId === 'telnyx'
+                                  ? 'Official Telnyx V2 API Key + From Number'
+                                  : 'Official Google Cloud / Gemini API Key (AIza...)'}
+                              </p>
+                            </button>
+
+                            {selectedId !== 'google_maps' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setConnectionModeTab('templates_guide');
+                                  setFeedback(null);
+                                }}
+                                className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                  connectionModeTab === 'templates_guide'
+                                    ? 'bg-indigo-950 text-white border-indigo-700 shadow-xs'
+                                    : 'bg-indigo-50/60 text-indigo-950 border-indigo-200 hover:bg-indigo-100/70'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-1">
+                                  <span className="text-xs font-bold">
+                                    2. Ready-Made Make / n8n / Zapier Templates & Step-by-Step Guide
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase ${
+                                      connectionModeTab === 'templates_guide'
+                                        ? 'bg-emerald-400 text-slate-950'
+                                        : 'bg-indigo-600 text-white'
+                                    }`}
+                                  >
+                                    1-Click Import JSON
+                                  </span>
+                                </div>
+                                <p
+                                  className={`text-[11px] mt-1 leading-snug ${
+                                    connectionModeTab === 'templates_guide'
+                                      ? 'text-indigo-200'
+                                      : 'text-indigo-800'
+                                  }`}
+                                >
+                                  Download our pre-built Make.com or n8n Blueprint (.json) with your CRM URL already inside—import in 2 clicks for 100% hands-free AI automation!
+                                </p>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* ===================================================================== */}
+                        {/* TAB 1: OFFICIAL DIRECT API METHOD (META / TELNYX / GOOGLE CLOUD)      */}
+                        {/* ===================================================================== */}
+                        {connectionModeTab === 'official_api' && (
+                          <form
+                            onSubmit={handleSaveChannel}
+                            className="p-5 rounded-2xl border-2 border-slate-900/15 bg-slate-50/70 space-y-4"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="px-2 py-0.5 rounded-md bg-slate-900 text-white text-[10px] font-bold uppercase tracking-wider">
+                                    Official Method
+                                  </span>
+                                  <h4 className="text-sm font-bold text-slate-900">
+                                    {selectedId === 'whatsapp'
+                                      ? 'Official Meta WhatsApp Cloud API (Direct Graph API)'
+                                      : selectedId === 'instagram'
+                                      ? 'Official Meta Instagram Graph API (Direct Token)'
+                                      : selectedId === 'facebook'
+                                      ? 'Official Facebook Page Graph API (Direct Page Token)'
+                                      : selectedId === 'telnyx'
+                                      ? 'Official Telnyx V2 SMS & Voice API'
+                                      : 'Official Google Maps & Gemini Grounding API'}
+                                  </h4>
+                                </div>
+                                <p className="text-xs text-slate-600 mt-1">
+                                  {selectedId === 'whatsapp'
+                                    ? 'Paste your permanent or temporary WhatsApp Cloud API Access Token and Phone Number ID from developers.facebook.com -> WhatsApp -> API Setup. Our server verifies your credentials live against graph.facebook.com/v19.0.'
+                                    : selectedId === 'instagram'
+                                    ? 'Paste your official Instagram Graph Access Token from developers.facebook.com. Verified live against graph.facebook.com/v19.0/me.'
+                                    : selectedId === 'facebook'
+                                    ? 'Paste your official Facebook Page Access Token from developers.facebook.com. Verified live against graph.facebook.com/v19.0/me.'
+                                    : selectedId === 'telnyx'
+                                    ? 'Paste your official Telnyx V2 API Key (KEY...) and Telnyx Phone Number (+1...) from portal.telnyx.com. Verified live against api.telnyx.com/v2/balance.'
+                                    : 'Paste your official Google / Gemini API Key (starts with AIza...) from aistudio.google.com/apikey. Verified live against Google APIs.'}
+                                </p>
+                              </div>
+                              {selectedId !== 'google_maps' && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setConnectionModeTab('templates_guide')
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 text-[11px] font-bold cursor-pointer"
+                                >
+                                  <BookOpen className="w-3.5 h-3.5 text-indigo-700" />
+                                  <span>
+                                    Need Step-by-Step Guide or Make/n8n Template?
+                                  </span>
+                                </button>
+                              )}
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-800 mb-1">
+                                {activeDef.handleLabel ||
+                                  'Account Handle / Phone Number'}
+                              </label>
+                              <input
+                                type="text"
+                                value={accountHandle}
+                                onChange={(e) =>
+                                  setAccountHandle(e.target.value)
+                                }
+                                placeholder={activeDef.handlePlaceholder || ''}
+                                className="w-full px-3.5 py-2 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-slate-900"
+                              />
+                            </div>
+
+                            <div className="space-y-3">
+                              {activeDef.secretFields.map((field) => {
+                                const status = vaultStatus[field.keyName];
+                                return (
+                                  <div key={field.keyName}>
+                                    <div className="flex items-center justify-between mb-1">
+                                      <label className="text-xs font-semibold text-slate-800">
+                                        {field.label}
+                                      </label>
+                                      {status?.configured ? (
+                                        <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                                          Saved in Vault: {status.masked}
+                                        </span>
+                                      ) : (
+                                        <span className="text-[11px] text-slate-500">
+                                          Official API Credential
+                                        </span>
+                                      )}
+                                    </div>
+                                    <input
+                                      type="password"
+                                      value={secretInputs[field.keyName] || ''}
+                                      onChange={(e) =>
+                                        setSecretInputs((prev) => ({
+                                          ...prev,
+                                          [field.keyName]: e.target.value,
+                                        }))
+                                      }
+                                      placeholder={
+                                        status?.configured
+                                          ? `Saved (${status.masked}) — paste new key to update`
+                                          : field.placeholder
+                                      }
+                                      className="w-full px-3.5 py-2.5 text-xs bg-white border border-slate-300 rounded-xl font-mono focus:outline-none focus:border-slate-900"
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {feedback && (
+                              <div
+                                className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+                                  feedback.type === 'success'
+                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                    : 'bg-rose-50 border-rose-200 text-rose-800'
+                                }`}
+                              >
+                                {feedback.type === 'success' ? (
+                                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                                ) : (
+                                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                                )}
+                                <span>{feedback.text}</span>
+                              </div>
+                            )}
+
+                            <div className="flex items-center justify-between pt-2">
+                              <button
+                                type="button"
+                                onClick={handleClearChannel}
+                                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" /> Disconnect All
+                              </button>
+
+                              <button
+                                type="submit"
+                                disabled={saving}
+                                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors cursor-pointer"
+                              >
+                                {saving ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                                )}
+                                <span>
+                                  Verify Official API & Connect{' '}
+                                  {activeDef.name.split(' (')[0]}
+                                </span>
+                              </button>
+                            </div>
+                          </form>
                         )}
-                        {currentChannelAccounts.length > 0
-                          ? 'Verify & Add / Update Account'
-                          : 'Verify Live API & Connect'}
-                      </button>
-                    </div>
-                  </form>
+
+                        {/* ===================================================================== */}
+                        {/* TAB 2: READY-MADE MAKE.COM / N8N / ZAPIER TEMPLATES & STEP-BY-STEP    */}
+                        {/* ===================================================================== */}
+                        {connectionModeTab === 'templates_guide' &&
+                          selectedId !== 'google_maps' && (
+                            <div className="space-y-4">
+                              {selectedId === 'whatsapp' && (
+                                <div className="p-4 rounded-2xl border-2 border-emerald-500/40 bg-emerald-50/60 space-y-3.5">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2">
+                                      <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-wider">
+                                        Bonus WhatsApp Option · Phone QR Code Scan
+                                      </span>
+                                      <span className="text-xs font-bold text-emerald-950">
+                                        Connect WhatsApp via 30-Second Phone QR Scan (Ultramsg.com — 100% Automatic AI Background Replies)
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <ol className="list-decimal list-inside text-[11px] text-emerald-900 space-y-1 leading-relaxed">
+                                    <li>
+                                      Create a free instance at{' '}
+                                      <span className="font-mono font-semibold">
+                                        ultramsg.com
+                                      </span>{' '}
+                                      and scan the QR code using your phone’s
+                                      WhatsApp app (
+                                      <strong>Settings → Linked Devices</strong>
+                                      ).
+                                    </li>
+                                    <li>
+                                      Paste your <strong>Instance ID</strong>{' '}
+                                      and <strong>Token</strong> below, then
+                                      click{' '}
+                                      <strong>Verify Live QR & Connect</strong>.
+                                    </li>
+                                  </ol>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                                    <input
+                                      type="text"
+                                      value={accountHandle}
+                                      onChange={(e) =>
+                                        setAccountHandle(e.target.value)
+                                      }
+                                      placeholder="Your WhatsApp Number (+1310...)"
+                                      className="px-3 py-2 text-xs bg-white border border-emerald-300 rounded-xl text-slate-900 focus:outline-none focus:border-emerald-700"
+                                    />
+                                    <input
+                                      type="text"
+                                      value={
+                                        secretInputs['ULTRAMSG_INSTANCE_ID'] ||
+                                        ''
+                                      }
+                                      onChange={(e) =>
+                                        setSecretInputs((prev) => ({
+                                          ...prev,
+                                          ULTRAMSG_INSTANCE_ID: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="Ultramsg Instance ID (instance12345)"
+                                      className="px-3 py-2 text-xs bg-white border border-emerald-300 rounded-xl font-mono text-slate-900 focus:outline-none focus:border-emerald-700"
+                                    />
+                                    <input
+                                      type="password"
+                                      value={
+                                        secretInputs['ULTRAMSG_TOKEN'] || ''
+                                      }
+                                      onChange={(e) =>
+                                        setSecretInputs((prev) => ({
+                                          ...prev,
+                                          ULTRAMSG_TOKEN: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="Ultramsg Token"
+                                      className="px-3 py-2 text-xs bg-white border border-emerald-300 rounded-xl font-mono text-slate-900 focus:outline-none focus:border-emerald-700"
+                                    />
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    disabled={saving}
+                                    onClick={async () => {
+                                      setSaving(true);
+                                      setFeedback(null);
+                                      try {
+                                        const res = await onSaveChannelConfig(
+                                          'whatsapp',
+                                          {
+                                            accountHandle:
+                                              accountHandle.trim(),
+                                            webhookUrl: webhookUrl.trim(),
+                                            secrets: {
+                                              ULTRAMSG_INSTANCE_ID: (
+                                                secretInputs[
+                                                  'ULTRAMSG_INSTANCE_ID'
+                                                ] || ''
+                                              ).trim(),
+                                              ULTRAMSG_TOKEN: (
+                                                secretInputs[
+                                                  'ULTRAMSG_TOKEN'
+                                                ] || ''
+                                              ).trim(),
+                                            },
+                                          }
+                                        );
+                                        await refreshVaultStatus();
+                                        setFeedback({
+                                          type: 'success',
+                                          text:
+                                            res?.verificationMessage ||
+                                            '✅ Verified Ultramsg QR WhatsApp Gateway live!',
+                                        });
+                                      } catch (err: any) {
+                                        setFeedback({
+                                          type: 'error',
+                                          text:
+                                            err?.message ||
+                                            'Ultramsg verification failed.',
+                                        });
+                                      } finally {
+                                        setSaving(false);
+                                      }
+                                    }}
+                                    className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors cursor-pointer"
+                                  >
+                                    {saving ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <CheckCircle2 className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>Verify Live QR & Connect WhatsApp</span>
+                                  </button>
+                                </div>
+                              )}
+
+                              <AutomationBlueprintGuide
+                                channelId={selectedId as ToolId}
+                                accountHandle={accountHandle}
+                                webhookUrl={webhookUrl}
+                                onChangeAccountHandle={setAccountHandle}
+                                onChangeWebhookUrl={setWebhookUrl}
+                                onSaveWebhookConnection={async (targetChannelId) => {
+                                  setSaving(true);
+                                  setFeedback(null);
+                                  try {
+                                    const res = await onSaveChannelConfig(
+                                      targetChannelId || (selectedId as ToolId),
+                                      {
+                                        accountHandle: accountHandle.trim(),
+                                        webhookUrl: webhookUrl.trim(),
+                                        secrets: secretInputs,
+                                      }
+                                    );
+                                    await refreshVaultStatus();
+                                    setFeedback({
+                                      type: 'success',
+                                      text:
+                                        res?.verificationMessage ||
+                                        '✅ Verified Outbound Webhook live!',
+                                    });
+                                  } catch (err: any) {
+                                    setFeedback({
+                                      type: 'error',
+                                      text:
+                                        err?.message ||
+                                        'Live webhook verification failed.',
+                                    });
+                                  } finally {
+                                    setSaving(false);
+                                  }
+                                }}
+                                onOpenWebhookHealth={() =>
+                                  setSelectedId('webhook_health')
+                                }
+                                onWebsiteLeadReceived={onWebsiteLeadReceived}
+                                saving={saving}
+                                feedback={feedback}
+                                fullPageMode={false}
+                              />
+                            </div>
+                          )}
+                      </>
+                    )}
+                  </div>
                 )}
               </>
             )}
